@@ -18,6 +18,7 @@ from .router_stock_adjustments import router as stock_adjustments_router
 from .router_reports import router as reports_router
 from .router_db_sync import router as db_sync_router
 from .router_server_station import router as server_station_router
+from .router_remote_server import router as remote_server_router
 
 __all__ = [
     "auth_router",
@@ -33,5 +34,6 @@ __all__ = [
     "stock_adjustments_router",
     "reports_router",
     "db_sync_router",
-    "server_station_router"
+    "server_station_router",
+    "remote_server_router"
 ]

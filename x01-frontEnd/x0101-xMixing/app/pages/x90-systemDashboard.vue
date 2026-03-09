@@ -21,6 +21,73 @@ const formatDateTime = (date: any) => {
   return d.toLocaleString('en-GB')
 }
 
+// ── Active DB State ──
+interface ActiveDbInfo {
+  key: string
+  label: string
+  host: string
+  icon: string
+}
+interface DbOption {
+  key: string
+  label: string
+  host: string
+  icon: string
+  active: boolean
+}
+const activeDb = ref<ActiveDbInfo | null>(null)
+const dbOptions = ref<DbOption[]>([])
+const dbSwitching = ref(false)
+
+const fetchActiveDb = async () => {
+  try {
+    const data = await $fetch<ActiveDbInfo>(`${appConfig.apiBaseUrl}/db-sync/active-db`)
+    activeDb.value = data
+  } catch (e) {
+    console.error('Active DB fetch error:', e)
+  }
+}
+
+const fetchDbOptions = async () => {
+  try {
+    const data = await $fetch<DbOption[]>(`${appConfig.apiBaseUrl}/db-sync/db-options`)
+    dbOptions.value = data
+  } catch (e) {
+    console.error('DB options fetch error:', e)
+  }
+}
+
+const handleSwitchDb = (key: string) => {
+  if (activeDb.value?.key === key) return
+
+  const target = dbOptions.value.find((o: DbOption) => o.key === key)
+  const label = target?.label || key
+
+  $q.dialog({
+    title: 'Switch Active Database',
+    message: `Switch to <b>${label}</b> (${target?.host})?<br><br>All subsequent API calls will use this database.`,
+    html: true,
+    cancel: true,
+    persistent: true,
+    ok: { label: 'Switch', color: key === 'cloudDB' ? 'amber-8' : 'teal-8', icon: target?.icon || 'storage' },
+  }).onOk(async () => {
+    dbSwitching.value = true
+    try {
+      await $fetch(`${appConfig.apiBaseUrl}/db-sync/active-db`, {
+        method: 'POST',
+        body: { key },
+      })
+      await fetchActiveDb()
+      await fetchDbOptions()
+      $q.notify({ type: 'positive', message: `Switched to ${label}`, icon: target?.icon || 'storage' })
+    } catch (e: any) {
+      $q.notify({ type: 'negative', message: 'Failed to switch database', caption: e?.data?.detail || e?.message })
+    } finally {
+      dbSwitching.value = false
+    }
+  })
+}
+
 // ── DB Sync State ──
 const syncLoading = ref<string | null>(null) // 'cloud-to-remote' | 'remote-to-cloud' | null
 const syncLog = ref<string[]>([])
@@ -74,8 +141,80 @@ const handleSync = async (direction: 'cloud-to-remote' | 'remote-to-cloud') => {
   })
 }
 
+// ── Host Info & Connected Devices ──
+interface HostInfo {
+  hostname: string
+  ip_addresses: string[]
+  os_name: string
+  os_version: string
+  kernel: string
+  architecture: string
+  cpu_model: string
+  total_ram: string
+  username: string
+  uptime: string
+  boot_time_iso: string
+}
+
+interface ConnectedDevice {
+  name: string
+  type: string
+  status: string
+  details: string
+  icon: string
+}
+
+interface ConnectedDevicesData {
+  usb_devices: ConnectedDevice[]
+  network_devices: ConnectedDevice[]
+  serial_devices: ConnectedDevice[]
+}
+
+const hostInfo = ref<HostInfo | null>(null)
+const connectedDevices = ref<ConnectedDevicesData | null>(null)
+
+const fetchHostInfo = async () => {
+  try {
+    const data = await $fetch<HostInfo>(`${appConfig.apiBaseUrl}/host-info`)
+    hostInfo.value = data
+  } catch (e) {
+    console.error('Host info fetch error:', e)
+  }
+}
+
+const fetchConnectedDevices = async () => {
+  try {
+    const data = await $fetch<ConnectedDevicesData>(`${appConfig.apiBaseUrl}/connected-devices`)
+    connectedDevices.value = data
+  } catch (e) {
+    console.error('Connected devices fetch error:', e)
+  }
+}
+
+const allDevices = computed(() => {
+  if (!connectedDevices.value) return []
+  return [
+    ...connectedDevices.value.usb_devices,
+    ...connectedDevices.value.network_devices,
+    ...connectedDevices.value.serial_devices,
+  ]
+})
+
+const deviceStatusColor = (status: string) => {
+  switch (status) {
+    case 'connected': case 'up': return 'green'
+    case 'available': return 'blue'
+    case 'down': return 'red'
+    default: return 'grey'
+  }
+}
+
 onMounted(() => {
+  fetchActiveDb()
+  fetchDbOptions()
   fetchDbStatus()
+  fetchHostInfo()
+  fetchConnectedDevices()
 })
 
 interface MetricPoint {
@@ -222,16 +361,42 @@ const netSeries = computed(() => [
   }
 ])
 
+// ── Remote Server Status ──
+const remoteStatus = ref<ServerStatus | null>(null)
+const remoteLoading = ref(true)
+const remoteError = ref<string | null>(null)
+let remotePollTimer: any = null
+
+const fetchRemoteStatus = async () => {
+  try {
+    const response = await fetch(`${appConfig.apiBaseUrl}/remote-server/status`)
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}))
+      throw new Error(errData.detail || 'Failed to fetch remote server status')
+    }
+    remoteStatus.value = await response.json()
+    remoteError.value = null
+  } catch (e: any) {
+    console.error('Remote server status error:', e)
+    remoteError.value = e.message || 'Cannot connect'
+  } finally {
+    remoteLoading.value = false
+  }
+}
+
 onMounted(() => {
   fetchStatus()
   fetchHistory()
+  fetchRemoteStatus()
   pollTimer = setInterval(fetchStatus, 3000)
-  historyTimer = setInterval(fetchHistory, 10000) // History every 10s
+  historyTimer = setInterval(fetchHistory, 10000)
+  remotePollTimer = setInterval(fetchRemoteStatus, 5000)
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (historyTimer) clearInterval(historyTimer)
+  if (remotePollTimer) clearInterval(remotePollTimer)
 })
 </script>
 
@@ -256,6 +421,73 @@ onUnmounted(() => {
         <!-- Left Pane: PC Info and Uptime -->
         <div class="col-12 col-md-3">
           <div class="column q-gutter-md">
+            <!-- Active Database Selector Card -->
+            <q-card flat bordered class="active-db-card">
+              <q-card-section>
+                <div class="text-subtitle1 text-weight-bold flex items-center">
+                  <q-icon name="storage" class="q-mr-xs" />
+                  Active Database
+                  <q-spacer />
+                  <q-spinner-dots v-if="dbSwitching" size="20px" color="white" />
+                </div>
+              </q-card-section>
+              <q-card-section class="q-pt-none">
+                <!-- Current Active DB Display -->
+                <div v-if="activeDb" class="q-mb-md">
+                  <div class="row items-center q-mb-sm">
+                    <q-icon
+                      :name="activeDb.icon"
+                      size="sm"
+                      class="q-mr-sm"
+                      :color="activeDb.key === 'cloudDB' ? 'amber-4' : 'green-4'"
+                    />
+                    <div>
+                      <div class="text-subtitle2 text-weight-bold">{{ activeDb.label }}</div>
+                      <div class="text-caption opacity-70">{{ activeDb.host }}</div>
+                    </div>
+                  </div>
+                  <q-badge
+                    :color="activeDb.key === 'cloudDB' ? 'amber' : 'teal'"
+                    text-color="black"
+                    class="q-px-sm"
+                  >
+                    <q-icon :name="activeDb.icon" size="xs" class="q-mr-xs" />
+                    {{ activeDb.key === 'cloudDB' ? 'CLOUD' : 'REMOTE' }}
+                  </q-badge>
+                </div>
+                <q-skeleton v-else type="rect" height="50px" class="q-mb-md" />
+
+                <!-- DB Selection Buttons -->
+                <div class="column q-gutter-sm">
+                  <q-btn
+                    v-for="opt in dbOptions"
+                    :key="opt.key"
+                    :icon="opt.icon"
+                    :label="opt.label"
+                    :color="opt.key === activeDb?.key
+                      ? (opt.key === 'cloudDB' ? 'amber-8' : 'teal-8')
+                      : 'grey-7'"
+                    :outline="opt.key !== activeDb?.key"
+                    class="full-width"
+                    dense
+                    no-caps
+                    :loading="dbSwitching"
+                    :disable="dbSwitching"
+                    @click="handleSwitchDb(opt.key)"
+                  >
+                    <q-tooltip v-if="opt.key === activeDb?.key">Currently active</q-tooltip>
+                    <template v-slot:append>
+                      <q-icon
+                        v-if="opt.key === activeDb?.key"
+                        name="check_circle"
+                        size="xs"
+                      />
+                    </template>
+                  </q-btn>
+                </div>
+              </q-card-section>
+            </q-card>
+
             <!-- PC Info Card -->
             <q-card flat bordered class="bg-primary text-white">
               <q-card-section>
@@ -366,6 +598,111 @@ onUnmounted(() => {
                   :disable="!!syncLoading"
                   @click="handleSync('cloud-to-remote')"
                 />
+              </q-card-section>
+            </q-card>
+
+            <!-- Host Info Card -->
+            <q-card flat bordered class="bg-indigo-9 text-white">
+              <q-card-section>
+                <div class="text-subtitle1 text-weight-bold flex items-center">
+                  <q-icon name="info" class="q-mr-xs" />
+                  Host Information
+                  <q-spacer />
+                  <q-btn flat round dense icon="refresh" size="sm" @click="fetchHostInfo" />
+                </div>
+              </q-card-section>
+              <q-card-section class="q-pt-none">
+                <template v-if="hostInfo">
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">Username</div>
+                    <div class="text-subtitle2">{{ hostInfo.username }}</div>
+                  </div>
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">OS</div>
+                    <div class="text-subtitle2">{{ hostInfo.os_name }} {{ hostInfo.os_version }}</div>
+                  </div>
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">Kernel</div>
+                    <div class="text-subtitle2" style="font-size: 0.75rem;">{{ hostInfo.kernel }}</div>
+                  </div>
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">CPU</div>
+                    <div class="text-subtitle2" style="font-size: 0.75rem;">{{ hostInfo.cpu_model }}</div>
+                  </div>
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">Total RAM</div>
+                    <div class="text-subtitle2">{{ hostInfo.total_ram }}</div>
+                  </div>
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">IP Addresses</div>
+                    <div class="text-subtitle2">
+                      <q-badge v-for="(ip, idx) in hostInfo.ip_addresses" :key="idx" color="indigo-6" class="q-mr-xs q-mb-xs">{{ ip }}</q-badge>
+                    </div>
+                  </div>
+                  <div class="q-mb-xs">
+                    <div class="text-caption opacity-70">Uptime</div>
+                    <div class="text-subtitle2">
+                      <q-icon name="schedule" size="xs" class="q-mr-xs" />{{ hostInfo.uptime }}
+                    </div>
+                  </div>
+                </template>
+                <q-skeleton v-else type="text" :count="5" />
+              </q-card-section>
+            </q-card>
+
+            <!-- Connected Devices Card -->
+            <q-card flat bordered class="bg-deep-purple-9 text-white">
+              <q-card-section>
+                <div class="text-subtitle1 text-weight-bold flex items-center">
+                  <q-icon name="devices" class="q-mr-xs" />
+                  Connected Devices
+                  <q-spacer />
+                  <q-badge color="deep-purple-4" text-color="white">
+                    {{ allDevices.length }}
+                  </q-badge>
+                  <q-btn flat round dense icon="refresh" size="sm" class="q-ml-xs" @click="fetchConnectedDevices" />
+                </div>
+              </q-card-section>
+              <q-card-section class="q-pt-none">
+                <template v-if="connectedDevices">
+                  <!-- USB Devices -->
+                  <div v-if="connectedDevices.usb_devices.length" class="q-mb-sm">
+                    <div class="text-caption text-deep-purple-3 q-mb-xs">USB Devices</div>
+                    <div v-for="(dev, i) in connectedDevices.usb_devices" :key="'usb-'+i" class="row items-center q-mb-xs">
+                      <q-icon :name="dev.icon" size="xs" class="q-mr-xs" />
+                      <span class="text-caption ellipsis" style="flex: 1;">{{ dev.name }}</span>
+                      <q-badge :color="deviceStatusColor(dev.status)" size="xs">{{ dev.status }}</q-badge>
+                    </div>
+                  </div>
+
+                  <!-- Network Interfaces -->
+                  <div v-if="connectedDevices.network_devices.length" class="q-mb-sm">
+                    <div class="text-caption text-deep-purple-3 q-mb-xs">Network Interfaces</div>
+                    <div v-for="(dev, i) in connectedDevices.network_devices" :key="'net-'+i" class="row items-center q-mb-xs">
+                      <q-icon :name="dev.icon" size="xs" class="q-mr-xs" />
+                      <div style="flex: 1;">
+                        <div class="text-caption">{{ dev.name }}</div>
+                        <div class="text-caption opacity-70" style="font-size: 0.65rem;">{{ dev.details }}</div>
+                      </div>
+                      <q-badge :color="deviceStatusColor(dev.status)" size="xs">{{ dev.status }}</q-badge>
+                    </div>
+                  </div>
+
+                  <!-- Serial Ports -->
+                  <div v-if="connectedDevices.serial_devices.length">
+                    <div class="text-caption text-deep-purple-3 q-mb-xs">Serial Ports</div>
+                    <div v-for="(dev, i) in connectedDevices.serial_devices" :key="'serial-'+i" class="row items-center q-mb-xs">
+                      <q-icon :name="dev.icon" size="xs" class="q-mr-xs" />
+                      <span class="text-caption" style="flex: 1;">{{ dev.name }}</span>
+                      <q-badge :color="deviceStatusColor(dev.status)" size="xs">{{ dev.status }}</q-badge>
+                    </div>
+                  </div>
+
+                  <div v-if="allDevices.length === 0" class="text-caption text-center opacity-70 q-pa-sm">
+                    No devices detected
+                  </div>
+                </template>
+                <q-skeleton v-else type="text" :count="3" />
               </q-card-section>
             </q-card>
           </div>
@@ -581,8 +918,309 @@ onUnmounted(() => {
                 </q-card-section>
               </q-card>
             </div>
+
+            <!-- Disk History Chart -->
+            <div class="col-12 col-md-6">
+              <q-card flat bordered>
+                <q-card-section class="q-pb-none">
+                  <div class="text-subtitle2 text-weight-bold">
+                    <q-icon name="storage" size="xs" class="q-mr-xs" color="purple" />
+                    Disk History (1h)
+                  </div>
+                </q-card-section>
+                <q-card-section>
+                  <apexchart height="200" :options="baseChartOptions" :series="diskSeries" />
+                </q-card-section>
+              </q-card>
+            </div>
+
+            <!-- Network History Chart -->
+            <div class="col-12 col-md-6">
+              <q-card flat bordered>
+                <q-card-section class="q-pb-none">
+                  <div class="text-subtitle2 text-weight-bold">
+                    <q-icon name="swap_calls" size="xs" class="q-mr-xs" color="green" />
+                    Network History (1h)
+                  </div>
+                </q-card-section>
+                <q-card-section>
+                  <apexchart height="200" :options="baseChartOptions" :series="netSeries" />
+                </q-card-section>
+              </q-card>
+            </div>
           </div>
         </div>
+      </div>
+
+      <!-- ═══════════════════════════════════════════════════════ -->
+      <!-- REMOTE SERVER DASHBOARD (192.168.121.11) -->
+      <!-- ═══════════════════════════════════════════════════════ -->
+      <div class="row q-col-gutter-md q-mt-md">
+        <div class="col-12">
+          <div class="text-h5 flex items-center">
+            <q-icon name="dns" class="q-mr-sm" color="cyan" />
+            Remote Server Dashboard
+            <q-spacer />
+            <q-chip color="cyan-8" text-color="white" icon="router" dense>
+              192.168.121.11
+            </q-chip>
+            <q-btn
+              flat round dense
+              icon="refresh"
+              color="cyan"
+              class="q-ml-sm"
+              :loading="remoteLoading"
+              @click="fetchRemoteStatus"
+            />
+          </div>
+        </div>
+
+        <!-- Remote Server Error -->
+        <div v-if="remoteError" class="col-12">
+          <q-banner class="bg-red-1 text-red-8 rounded-borders">
+            <template v-slot:avatar>
+              <q-icon name="warning" color="red" />
+            </template>
+            <strong>Cannot connect to remote server:</strong> {{ remoteError }}
+            <template v-slot:action>
+              <q-btn flat label="Retry" color="red" @click="fetchRemoteStatus" />
+            </template>
+          </q-banner>
+        </div>
+
+        <!-- Remote Server Loading -->
+        <template v-if="remoteLoading && !remoteStatus && !remoteError">
+          <div class="col-12 col-md-4" v-for="n in 3" :key="'rskel-'+n">
+            <q-card flat bordered class="full-height">
+              <q-card-section>
+                <q-skeleton type="text" width="60%" />
+              </q-card-section>
+              <q-card-section class="flex flex-center">
+                <q-skeleton type="circle" size="120px" />
+              </q-card-section>
+              <q-card-section>
+                <q-skeleton type="text" :count="3" />
+              </q-card-section>
+            </q-card>
+          </div>
+        </template>
+
+        <template v-if="remoteStatus">
+          <!-- Remote PC Info -->
+          <div class="col-12 col-md-3">
+            <q-card flat bordered class="remote-info-card full-height">
+              <q-card-section>
+                <div class="text-subtitle1 text-weight-bold flex items-center">
+                  <q-icon name="computer" class="q-mr-xs" />
+                  Server Info
+                </div>
+              </q-card-section>
+              <q-card-section class="q-pt-none">
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">Hostname</div>
+                  <div class="text-subtitle2">{{ remoteStatus.hostname }}</div>
+                </div>
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">IP Address</div>
+                  <div class="text-subtitle2">{{ remoteStatus.local_ip }}</div>
+                </div>
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">OS</div>
+                  <div class="text-subtitle2">{{ remoteStatus.os }}</div>
+                </div>
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">Architecture</div>
+                  <div class="text-subtitle2">{{ remoteStatus.architecture }}</div>
+                </div>
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">CPU Model</div>
+                  <div class="text-subtitle2" style="font-size: 0.75rem;">{{ remoteStatus.cpu_model }}</div>
+                </div>
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">Python</div>
+                  <div class="text-subtitle2">{{ remoteStatus.python_version }}</div>
+                </div>
+                <div class="q-mb-xs">
+                  <div class="text-caption opacity-70">Boot Time</div>
+                  <div class="text-subtitle2">{{ formatDateTime(remoteStatus.boot_time * 1000) }}</div>
+                </div>
+              </q-card-section>
+            </q-card>
+          </div>
+
+          <!-- Remote Metrics -->
+          <div class="col-12 col-md-9">
+            <div class="row q-col-gutter-md">
+              <!-- Remote CPU Usage -->
+              <div class="col-12 col-md-4">
+                <q-card flat bordered class="full-height">
+                  <q-card-section>
+                    <div class="text-subtitle1 text-weight-bold flex items-center">
+                      <q-icon name="memory" class="q-mr-xs" color="cyan" />
+                      CPU ({{ remoteStatus.cpu_count }} Cores)
+                    </div>
+                  </q-card-section>
+                  <q-card-section class="flex flex-center">
+                    <q-circular-progress
+                      show-value
+                      font-size="16px"
+                      :value="remoteStatus.cpu_average"
+                      size="120px"
+                      :thickness="0.2"
+                      color="cyan"
+                      track-color="cyan-1"
+                    >
+                      <div class="column items-center">
+                        <span class="text-h5 text-weight-bold">{{ remoteStatus.cpu_average.toFixed(1) }}%</span>
+                        <span class="text-caption">Avg</span>
+                      </div>
+                    </q-circular-progress>
+                  </q-card-section>
+                  <q-card-section class="q-pt-none">
+                    <div v-for="(p, i) in remoteStatus.cpu_percent.slice(0, 4)" :key="'rc-'+i" class="q-mb-xs">
+                      <div class="row justify-between text-caption">
+                        <span>Core {{ i }}</span>
+                        <span>{{ p.toFixed(1) }}%</span>
+                      </div>
+                      <q-linear-progress :value="p / 100" color="cyan" rounded />
+                    </div>
+                    <div v-if="remoteStatus.cpu_count > 4" class="text-center text-caption text-grey italic q-mt-xs">
+                      + {{ remoteStatus.cpu_count - 4 }} more cores
+                    </div>
+                  </q-card-section>
+                </q-card>
+              </div>
+
+              <!-- Remote Memory Usage -->
+              <div class="col-12 col-md-4">
+                <q-card flat bordered class="full-height">
+                  <q-card-section>
+                    <div class="text-subtitle1 text-weight-bold flex items-center">
+                      <q-icon name="memory" class="q-mr-xs" color="light-blue" />
+                      Memory (RAM)
+                    </div>
+                  </q-card-section>
+                  <q-card-section class="flex flex-center">
+                    <q-circular-progress
+                      show-value
+                      font-size="16px"
+                      :value="remoteStatus.memory.percent"
+                      size="120px"
+                      :thickness="0.2"
+                      color="light-blue"
+                      track-color="light-blue-1"
+                    >
+                      <div class="column items-center">
+                        <span class="text-h5 text-weight-bold">{{ remoteStatus.memory.percent.toFixed(1) }}%</span>
+                        <span class="text-caption">Used</span>
+                      </div>
+                    </q-circular-progress>
+                  </q-card-section>
+                  <q-card-section class="q-pt-none">
+                    <div class="column q-gutter-xs">
+                      <div class="row justify-between text-caption">
+                        <span class="text-grey-7">Used:</span>
+                        <span class="text-weight-bold text-light-blue">{{ formatBytes(remoteStatus.memory.used) }}</span>
+                      </div>
+                      <div class="row justify-between text-caption">
+                        <span class="text-grey-7">Available:</span>
+                        <span>{{ formatBytes(remoteStatus.memory.available) }}</span>
+                      </div>
+                      <div class="row justify-between text-caption">
+                        <span class="text-grey-7">Total:</span>
+                        <span>{{ formatBytes(remoteStatus.memory.total) }}</span>
+                      </div>
+                    </div>
+                  </q-card-section>
+                </q-card>
+              </div>
+
+              <!-- Remote Disk Usage -->
+              <div class="col-12 col-md-4">
+                <q-card flat bordered class="full-height">
+                  <q-card-section>
+                    <div class="text-subtitle1 text-weight-bold flex items-center">
+                      <q-icon name="storage" class="q-mr-xs" color="deep-purple" />
+                      Storage (Disk)
+                    </div>
+                  </q-card-section>
+                  <q-card-section class="flex flex-center">
+                    <q-circular-progress
+                      show-value
+                      font-size="16px"
+                      :value="remoteStatus.disk.percent"
+                      size="120px"
+                      :thickness="0.2"
+                      color="deep-purple"
+                      track-color="deep-purple-1"
+                    >
+                      <div class="column items-center">
+                        <span class="text-h5 text-weight-bold">{{ remoteStatus.disk.percent.toFixed(1) }}%</span>
+                        <span class="text-caption">Filled</span>
+                      </div>
+                    </q-circular-progress>
+                  </q-card-section>
+                  <q-card-section class="q-pt-none">
+                    <div class="column q-gutter-xs">
+                      <div class="row justify-between text-caption">
+                        <span class="text-grey-7">Free:</span>
+                        <span class="text-weight-bold text-deep-purple">{{ formatBytes(remoteStatus.disk.free) }}</span>
+                      </div>
+                      <div class="row justify-between text-caption">
+                        <span class="text-grey-7">Used:</span>
+                        <span>{{ formatBytes(remoteStatus.disk.used) }}</span>
+                      </div>
+                      <div class="row justify-between text-caption">
+                        <span class="text-grey-7">Total:</span>
+                        <span>{{ formatBytes(remoteStatus.disk.total) }}</span>
+                      </div>
+                    </div>
+                  </q-card-section>
+                </q-card>
+              </div>
+
+              <!-- Remote Network Traffic -->
+              <div class="col-12">
+                <q-card flat bordered>
+                  <q-card-section>
+                    <div class="text-subtitle1 text-weight-bold flex items-center">
+                      <q-icon name="swap_calls" class="q-mr-xs" color="teal" />
+                      Network Traffic
+                    </div>
+                  </q-card-section>
+                  <q-card-section class="q-pt-none">
+                    <div class="row q-col-gutter-sm">
+                      <div class="col-6 col-md-3">
+                        <div class="bg-teal-1 q-pa-sm rounded-borders">
+                          <div class="text-caption text-grey-7">Sent</div>
+                          <div class="text-subtitle1 text-weight-bold">{{ formatBytes(remoteStatus.network.bytes_sent) }}</div>
+                        </div>
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <div class="bg-teal-1 q-pa-sm rounded-borders">
+                          <div class="text-caption text-grey-7">Received</div>
+                          <div class="text-subtitle1 text-weight-bold">{{ formatBytes(remoteStatus.network.bytes_recv) }}</div>
+                        </div>
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <div class="bg-blue-grey-1 q-pa-sm rounded-borders">
+                          <div class="text-caption text-grey-7">Pkts Sent</div>
+                          <div class="text-subtitle1">{{ remoteStatus.network.packets_sent.toLocaleString() }}</div>
+                        </div>
+                      </div>
+                      <div class="col-6 col-md-3">
+                        <div class="bg-blue-grey-1 q-pa-sm rounded-borders">
+                          <div class="text-caption text-grey-7">Pkts Recv</div>
+                          <div class="text-subtitle1">{{ remoteStatus.network.packets_recv.toLocaleString() }}</div>
+                        </div>
+                      </div>
+                    </div>
+                  </q-card-section>
+                </q-card>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
 
       <!-- Placeholder content during server render -->
@@ -609,5 +1247,26 @@ onUnmounted(() => {
 }
 .opacity-70 {
   opacity: 0.7;
+}
+.active-db-card {
+  background: linear-gradient(135deg, #1a237e 0%, #0d47a1 50%, #01579b 100%);
+  color: white;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 12px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+.active-db-card .q-btn--outline {
+  border-color: rgba(255, 255, 255, 0.3);
+  color: rgba(255, 255, 255, 0.7);
+}
+.active-db-card .q-btn--outline:hover {
+  border-color: rgba(255, 255, 255, 0.6);
+  color: white;
+  background: rgba(255, 255, 255, 0.1);
+}
+.remote-info-card {
+  background: linear-gradient(135deg, #004d40 0%, #00695c 50%, #00897b 100%);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 </style>
