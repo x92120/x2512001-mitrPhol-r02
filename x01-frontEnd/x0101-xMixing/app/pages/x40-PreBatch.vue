@@ -27,8 +27,6 @@ const formatDate = (date: any) => {
   return d.toLocaleDateString('en-GB')
 }
 
-
-
 // ─── Shared refs (owned by page, passed into composables) ───
 const selectedReCode = ref('')
 const selectedRequirementId = ref<number | null>(null)
@@ -49,7 +47,6 @@ const {
   fetchWarehouses, fetchInventory, updateInventoryStatus,
   printIntakeLabel, openIntakeLabelDialog, onViewHistory,
   focusIntakeLotInput, onIntakeLotScanEnter, isFIFOCompliant,
-  simulateScan, onInventoryRowClick,
 } = usePreBatchInventory({
   $q, getAuthHeader: authHeader, t, formatDate,
   selectedReCode,
@@ -123,8 +120,6 @@ const currentPackageId = computed(() => {
   }
   return '-'
 })
-
-
 
 // ─── 3. Ingredients ───
 // selectedProductionPlan and selectedBatch are owned by production composable
@@ -274,6 +269,14 @@ const {
   productionPlans,
 })
 
+// Step 7: After label print (dialog closes) → reopen scan dialog for next batch
+watch(showLabelDialog, (newVal, oldVal) => {
+  if (oldVal === true && newVal === false && selectedReCode.value) {
+    // Label dialog just closed → reopen scan dialog for next item
+    setTimeout(() => openScanDialog(), 500)
+  }
+})
+
 // ── Pre-Batch Summary Report ──────────────
 const showPreBatchReportDialog = ref(false)
 const prebatchReportFromDate = ref('')
@@ -342,6 +345,238 @@ onMounted(() => {
   focusIntakeLotInput()
   connectMqtt()
 })
+
+// ── Rebatch ────────────────────────────────────
+const showRebatchDialog = ref(false)
+const rebatchRemark = ref('')
+const rebatchReason = ref('')
+const rebatchTarget = ref<any>(null)
+const rebatchIng = ref<any>(null)
+
+const rebatchReasonOptions = [
+  'Weight out of tolerance',
+  'Wrong ingredient',
+  'Contamination / Foreign matter',
+  'Equipment malfunction',
+  'Wrong lot / batch used',
+  'Other',
+]
+
+const rebatchFinalRemark = computed(() => {
+  if (rebatchReason.value === 'Other') return rebatchRemark.value.trim()
+  return rebatchReason.value
+})
+
+const onRebatchClick = (bd: any, ing: any) => {
+  rebatchTarget.value = bd
+  rebatchIng.value = ing
+  rebatchReason.value = ''
+  rebatchRemark.value = ''
+  showRebatchDialog.value = true
+}
+
+const confirmRebatch = async () => {
+  if (!rebatchFinalRemark.value) {
+    $q.notify({ type: 'warning', message: 'Please select or enter a reason for rebatch.', position: 'top' })
+    return
+  }
+  const bd = rebatchTarget.value
+  if (!bd) return
+  try {
+    // Unpack the item (clears packing fields, restores inventory)
+    await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${bd.req_id}/unpack`, {
+      method: 'DELETE',
+      headers: authHeader() as Record<string, string>,
+    })
+    $q.notify({ type: 'positive', message: `Rebatch: ${bd.batch_id} / ${rebatchIng.value?.re_code} — ready for re-weighing.`, position: 'top' })
+    showRebatchDialog.value = false
+    // Refresh data
+    const plan = productionPlans.value.find((p: any) => p.plan_id === selectedProductionPlan.value)
+    if (plan) await onPlanShow(plan)
+    if (rebatchIng.value) {
+      await ingredientsComposable.fetchIngredientBatchDetail(rebatchIng.value.re_code)
+    }
+    await fetchPreBatchRecords()
+  } catch (err) {
+    console.error('Rebatch error:', err)
+    $q.notify({ type: 'negative', message: 'Rebatch failed. Try again.', position: 'top' })
+  }
+}
+
+// ── Scan Prebatch Dialog (Workflow Controller) ──
+const showScanDialog = ref(false)
+const scanDialogItems = ref<any[]>([])
+const scanDialogLoading = ref(false)
+const scanLotInput = ref('')
+const scanLotValidated = ref(false)
+const scanLotError = ref('')
+
+// Current ingredient info for the dialog header
+const scanDialogIngInfo = computed(() => {
+  if (!selectedReCode.value) return null
+  const ing = ingredients.value.find((i: any) => i.re_code === selectedReCode.value)
+  const selIng = selectableIngredients.value.find((i: any) => i.re_code === selectedReCode.value)
+  return {
+    re_code: selectedReCode.value,
+    ingredient_name: selIng?.ingredient_name || ing?.name || selectedReCode.value,
+    mat_sap_code: ing?.mat_sap_code || '-',
+    total_require: selIng?.batch_require || requireVolume.value || 0,
+  }
+})
+
+// Group items by plan → batch → packs tree
+const scanDialogTree = computed(() => {
+  const grouped: Record<string, { plan_id: string; items: any[] }> = {}
+  for (const item of scanDialogItems.value) {
+    const pid = item.plan_id || '-'
+    if (!grouped[pid]) grouped[pid] = { plan_id: pid, items: [] }
+    grouped[pid].items.push(item)
+  }
+  return Object.values(grouped)
+})
+
+// Next pending item
+const nextPendingItem = computed(() => {
+  return scanDialogItems.value.find((item: any) => item.status !== 2)
+})
+
+// Count of completed / total
+const scanProgress = computed(() => {
+  const total = scanDialogItems.value.length
+  const done = scanDialogItems.value.filter((i: any) => i.status === 2).length
+  return { done, total }
+})
+
+// Recommended FIFO lot (first expiry, active, has stock)
+const fifoRecommendedLot = computed(() => {
+  if (filteredInventory.value.length === 0) return null
+  return filteredInventory.value[0] // Already sorted by expire_date ASC
+})
+
+/**
+ * Step 1: Click ingredient → open scan dialog
+ */
+const openScanDialog = async (ing?: any) => {
+  // If an ingredient is passed, select it first
+  if (ing) {
+    selectedReCode.value = ing.re_code
+    ingredientsComposable.onSelectIngredient(ing)
+  }
+
+  // Reset scan state
+  scanLotInput.value = ''
+  scanLotValidated.value = false
+  scanLotError.value = ''
+  showScanDialog.value = true
+
+  if (!selectedReCode.value || !selectedProductionPlan.value) return
+  scanDialogLoading.value = true
+  try {
+    const data = await $fetch<any[]>(
+      `${appConfig.apiBaseUrl}/prebatch-items/batches-by-ingredient/${selectedProductionPlan.value}/${encodeURIComponent(selectedReCode.value)}`,
+      { headers: authHeader() as Record<string, string> }
+    )
+    scanDialogItems.value = data
+  } catch (err) {
+    console.error('Scan dialog fetch error:', err)
+    scanDialogItems.value = []
+  } finally {
+    scanDialogLoading.value = false
+  }
+}
+
+/**
+ * Step 3: Scan intake lot label → validate
+ * Accepts only intake labels like "LB-26-004205"
+ * Checks FIFO (first expiry, active lot)
+ */
+const onScanLotEnter = async () => {
+  const lotId = scanLotInput.value.trim()
+  if (!lotId) return
+
+  // Find in inventory — check it matches the current ingredient, is active, FIFO
+  const invItem = inventoryRows.value.find((inv: any) =>
+    inv.intake_lot_id === lotId &&
+    inv.re_code === selectedReCode.value
+  )
+
+  if (!invItem) {
+    scanLotError.value = `Lot ${lotId} not found for ingredient "${selectedReCode.value}"`
+    scanLotValidated.value = false
+    return
+  }
+
+  if (invItem.status === 'Inactive' || invItem.status === 'Expired') {
+    scanLotError.value = `Lot ${lotId} is ${invItem.status}. Use an active lot.`
+    scanLotValidated.value = false
+    return
+  }
+
+  // FIFO check
+  if (!isFIFOCompliant(invItem as any)) {
+    scanLotError.value = `Lot ${lotId} is not FIFO compliant. Use the earliest expiry lot first.`
+    scanLotValidated.value = false
+    return
+  }
+
+  // Valid!
+  scanLotError.value = ''
+  scanLotValidated.value = true
+  selectedIntakeLotId.value = lotId
+  selectedInventoryItem.value = invItem as any
+
+  $q.notify({ type: 'positive', message: `✅ Lot ${lotId} verified`, position: 'top', timeout: 1500 })
+
+  // Step 4: Auto-select next pending prebatch item
+  const pending = nextPendingItem.value
+  if (pending) {
+    onScanItemSelect(pending)
+  } else {
+    $q.notify({ type: 'positive', message: 'All batches completed for this ingredient!', position: 'top' })
+  }
+}
+
+/**
+ * Step 4+5: Select item → close dialog → start weighing
+ */
+const onScanItemSelect = (item: any) => {
+  if (item.status === 2) return
+  onBatchIngredientClick(
+    { batch_id: item.batch_id },
+    { re_code: selectedReCode.value, id: item.req_id, required_volume: item.required_volume, status: item.status },
+    selectedPlanDetails.value
+  )
+  showScanDialog.value = false
+  $q.notify({ type: 'info', message: `Weighing: ${item.batch_id}`, position: 'top', timeout: 2000 })
+}
+
+/**
+ * Mid-weighing: Add current lot's partial weight, then reopen scan dialog for next lot
+ */
+const onAddLotAndScanNext = () => {
+  onAddLot(selectedIntakeLotId, selectableIngredients, selectedInventoryItem)
+  // Reset lot validation state
+  scanLotInput.value = ''
+  scanLotError.value = ''
+  scanLotValidated.value = false
+  // Reopen scan dialog for next lot
+  setTimeout(() => {
+    showScanDialog.value = true
+  }, 300)
+}
+
+/**
+ * Step 7: After label print → reopen scan dialog for next batch
+ * Called from onPrintLabel after a successful save
+ */
+const reopenScanDialogAfterPrint = () => {
+  // Small delay so label dialog closes smoothly
+  setTimeout(() => {
+    if (selectedReCode.value) {
+      openScanDialog()
+    }
+  }, 500)
+}
 </script>
 <template>
   <q-page class="q-pa-md bg-white">
@@ -509,18 +744,18 @@ onMounted(() => {
                             <th class="text-center" style="width: 30px"></th>
                             <th class="text-left" style="font-size: 0.7rem;">RE-Code</th>
                             <th class="text-center" style="font-size: 0.7rem;">Container</th>
-                            <th class="text-center" style="font-size: 0.7rem;">{{ t('preBatch.wh') }}</th>
                             <th class="text-right" style="font-size: 0.7rem;">Require</th>
                             <th class="text-right" style="font-size: 0.7rem;">Packaged</th>
                             <th class="text-center" style="font-size: 0.7rem;">{{ t('common.status') }}</th>
+                            <th class="text-center" style="font-size: 0.7rem; width: 50px;">Action</th>
                         </tr>
                     </thead>
                     <tbody>
                         <template v-for="ing in selectableIngredients" :key="ing.re_code">
                             <tr 
-                                class="transition-all"
+                                class="transition-all cursor-pointer"
                                 :class="getIngredientRowClass(ing)"
-                                @click="onSelectIngredient(ing)"
+                                @click="openScanDialog(ing)"
                             >
                                 <td class="text-center" style="padding: 0;">
                                     <q-btn
@@ -532,24 +767,23 @@ onMounted(() => {
                                     />
                                 </td>
                                 <td class="text-weight-bold transition-all" style="font-size: 0.75rem;">
-                                    <div class="cursor-pointer text-blue-9" @click.stop="onSelectIngredient(ing)">
+                                    <div class="cursor-pointer text-blue-9" @click.stop="openScanDialog(ing)">
                                         {{ ing.re_code }}
                                     </div>
                                     <q-tooltip>{{ ing.ingredient_name }}</q-tooltip>
                                 </td>
                                 <td class="text-center text-caption" style="font-size: 0.7rem;">{{ ing.package_container_type }}</td>
-                                <td class="text-center text-caption" style="font-size: 0.7rem;">{{ ing.from_warehouse }}</td>
                                 <td class="text-right text-weight-bold text-orange-9" style="font-size: 0.75rem;">{{ ing.batch_require ? ing.batch_require.toFixed(5) : '0' }}</td>
                                 <td class="text-right text-weight-bold text-green-9" style="font-size: 0.75rem;">{{ ing.total_packaged ? ing.total_packaged.toFixed(5) : '0' }}</td>
                                 <td class="text-center">
-                                    <div v-if="ing.status === 2" class="row no-wrap items-center justify-center q-gutter-x-xs">
-                                        <q-badge color="green" :label="t('preBatch.complete')" size="sm" />
-                                        <q-btn flat round dense icon="print" size="xs" color="blue-9" @click.stop="printAllPlanLabels(ing)">
-                                            <q-tooltip>Print All Labels for Plan</q-tooltip>
-                                        </q-btn>
-                                    </div>
+                                    <q-badge v-if="ing.status === 2" color="green" :label="t('preBatch.complete')" size="sm" />
                                     <q-badge v-else-if="ing.status === 1" color="orange" :label="t('preBatch.onBatch')" size="sm" />
                                     <q-badge v-else color="grey-6" label="Created" size="sm" />
+                                </td>
+                                <td class="text-center">
+                                    <q-btn v-if="ing.status === 2" flat round dense icon="print" size="xs" color="blue-9" @click.stop="printAllPlanLabels(ing)">
+                                        <q-tooltip>Print All Labels for Plan</q-tooltip>
+                                    </q-btn>
                                 </td>
                             </tr>
                             
@@ -565,14 +799,14 @@ onMounted(() => {
                                                     <th class="text-right" style="font-size: 0.65rem;">Require</th>
                                                     <th class="text-right" style="font-size: 0.65rem;">Packaged</th>
                                                     <th class="text-center" style="font-size: 0.65rem;">Status</th>
+                                                    <th class="text-center" style="font-size: 0.65rem; width: 40px;">Action</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
                                                 <template v-for="bd in (ingredientBatchDetail[ing.re_code] || [])" :key="bd.batch_id">
                                                     <tr 
-                                                        class="cursor-pointer"
-                                                        :class="bd.status === 2 ? 'bg-green-1 text-grey-6' : ''"
-                                                        @click="onBatchIngredientClick({ batch_id: bd.batch_id }, { re_code: ing.re_code, id: bd.req_id, required_volume: bd.required_volume, status: bd.status }, selectedPlanDetails)"
+                                                        :class="bd.status === 2 ? 'bg-green-1 text-grey-6' : 'cursor-pointer'"
+                                                        @click="bd.status !== 2 && onBatchIngredientClick({ batch_id: bd.batch_id }, { re_code: ing.re_code, id: bd.req_id, required_volume: bd.required_volume, status: bd.status }, selectedPlanDetails)"
                                                     >
                                                         <td style="padding: 0; width: 20px;">
                                                             <q-btn flat round dense size="xs"
@@ -589,10 +823,15 @@ onMounted(() => {
                                                             <q-badge v-else-if="bd.status === 1" color="orange" label="Batch" size="sm" />
                                                             <q-badge v-else color="grey-5" label="Wait" size="sm" />
                                                         </td>
+                                                        <td class="text-center">
+                                                            <q-btn v-if="bd.status === 2" flat round dense icon="edit" size="xs" color="orange-9" @click.stop="onRebatchClick(bd, ing)">
+                                                                <q-tooltip>Rebatch — cancel and re-weigh</q-tooltip>
+                                                            </q-btn>
+                                                        </td>
                                                     </tr>
                                                     <!-- Expanded package plan -->
                                                     <tr v-if="isBatchRowExpanded(bd.batch_id + '-' + ing.re_code)" class="bg-blue-grey-1">
-                                                        <td :colspan="5" class="q-pa-none q-pl-lg">
+                                                        <td :colspan="6" class="q-pa-none q-pl-lg">
                                                             <q-markup-table dense flat square separator="cell" class="bg-white" style="font-size: 0.6rem;">
                                                                 <thead class="bg-grey-2">
                                                                     <tr>
@@ -718,27 +957,35 @@ onMounted(() => {
                 <div class="text-subtitle1 text-weight-bold q-mr-sm">{{ t('preBatch.fromIntakeLotId') }}</div>
                 <div class="col-4">
                     <q-input
-                        ref="intakeLotInputRef"
                         outlined
-                        v-model="selectedIntakeLotId"
+                        :model-value="currentPackageOrigins.length > 0 ? currentPackageOrigins.map((o: any) => o.intake_lot_id).join(' + ') : (selectedIntakeLotId || '—')"
                         dense
-                        bg-color="white"
-                        :placeholder="t('preBatch.scanIntakeLotId')"
-                        clearable
-                        autofocus
-                        @keyup.enter="onIntakeLotScanEnter"
+                        bg-color="grey-2"
+                        readonly
+                    />
+                </div>
+            </q-card-section>
+
+            <!-- Lot Origin Chips (multi-lot tracking) -->
+            <q-card-section v-if="currentPackageOrigins.length > 0" class="q-py-xs">
+                <div class="row items-center q-gutter-xs">
+                    <q-icon name="inventory_2" color="blue-9" size="xs" />
+                    <span class="text-caption text-weight-bold text-blue-9">Lot Origins:</span>
+                    <q-chip
+                        v-for="(o, i) in currentPackageOrigins"
+                        :key="i"
+                        removable
+                        @remove="onRemoveLot(i)"
+                        color="blue-1"
+                        text-color="blue-9"
+                        dense
+                        class="q-ma-xs"
                     >
-                        <template v-slot:after>
-                           <q-btn icon="add" color="primary" round dense @click="() => onAddLot(selectedIntakeLotId, selectableIngredients, selectedInventoryItem)">
-                               <q-tooltip>Add Lot & weight</q-tooltip>
-                           </q-btn>
-                        </template>
-                    </q-input>
-                    <div v-if="currentPackageOrigins.length > 0" class="q-mt-xs row q-gutter-xs">
-                        <q-chip v-for="(o, i) in currentPackageOrigins" :key="i" removable @remove="onRemoveLot(i)" color="blue-1" text-color="blue-9" dense class="q-ma-xs">
-                            {{ o.intake_lot_id }} ({{ o.take_volume.toFixed(4) }}kg)
-                        </q-chip>
-                    </div>
+                        {{ o.intake_lot_id }} ({{ o.take_volume.toFixed(4) }} kg)
+                    </q-chip>
+                    <q-badge color="blue-9" class="q-ml-sm">
+                        Total: {{ currentPackageOrigins.reduce((s: number, o: any) => s + o.take_volume, 0).toFixed(4) }} kg
+                    </q-badge>
                 </div>
             </q-card-section>
 
@@ -871,51 +1118,33 @@ onMounted(() => {
                     </div>
                 </div>
 
-                <!-- CONTROLS ROW 2 -->
+                <!-- Controls Row: Add Lot & Done -->
                 <div class="row q-col-gutter-md items-end justify-end">
-                <!-- Batch Volume Removed -->
-                <!-- 
-                <div class="col-12 col-md-3">
-                    <div class="text-subtitle2 q-mb-xs">Batch Volume (kg)</div>
-                    <q-input
-                    outlined
-                    v-model.number="batchVolume"
-                    dense
-                    bg-color="grey-2"
-                    readonly
-                    input-class="text-right"
+                <!-- Add Lot Button (mid-weighing: lot empty, need next lot) -->
+                <div class="col-12 col-md-2" v-if="actualScaleValue > 0 && !isPackagedVolumeInTol && selectedIntakeLotId">
+                    <q-btn
+                    label="Add Lot & Scan Next"
+                    color="orange-9"
+                    text-color="white"
+                    icon="add_circle"
+                    class="full-width q-py-xs"
+                    size="md"
+                    unelevated
+                    @click="onAddLotAndScanNext"
                     />
                 </div>
-                -->
-
-                <!-- Request Batch MOVED UP -->
-
-                <!-- Actual Scale Value (Removed) -->
-                <!-- 
-                <div class="col-12 col-md-2">
-                    <div class="text-subtitle2 q-mb-xs">Actual Scale Value</div>
-                    <q-input
-                    outlined
-                    :model-value="actualScaleValue.toFixed(3)"
-                    readonly
-                    dense
-                    :bg-color="isToleranceExceeded ? 'yellow-13' : 'green-13'"
-                    input-class="text-center text-weight-bold"
-                    />
-                </div>
-                -->
 
                 <!-- Done Button -->
                 <div class="col-12 col-md-2">
                     <q-btn
                     :label="t('prodPlan.done')"
-                    color="grey-6"
-                    text-color="black"
+                    :color="isPackagedVolumeInTol ? 'green' : 'grey-6'"
+                    :text-color="isPackagedVolumeInTol ? 'white' : 'black'"
                     class="full-width q-py-xs"
                     size="md"
                     unelevated
                     @click="onDone"
-                    :disable="!selectedIntakeLotId && currentPackageOrigins.length === 0"
+                    :disable="!isPackagedVolumeInTol"
                     />
                 </div>
                 </div>
@@ -943,16 +1172,6 @@ onMounted(() => {
                  :loading="inventoryLoading"
                  separator="cell"
                  :pagination="{ rowsPerPage: 5 }"
-                 selection="single"
-                 v-model:selected="selectedInventoryItem"
-                 @row-click="onInventoryRowClick"
-                 :row-class="(row: any) => {
-                   const first = filteredInventory[0]
-                   if (!first) return ''
-                   const rowDate = row.expire_date ? new Date(row.expire_date).getTime() : Infinity
-                   const firstDate = first.expire_date ? new Date(first.expire_date).getTime() : Infinity
-                   return rowDate <= firstDate ? 'bg-green-1 cursor-pointer' : 'text-grey-5 cursor-not-allowed'
-                 }"
               >
                 <!-- Expire Date Highlight -->
                 <template v-slot:body-cell-expire_date="props">
@@ -1170,6 +1389,219 @@ onMounted(() => {
                     color="negative" 
                     unelevated 
                     @click="onConfirmDeleteManual" 
+                />
+            </q-card-actions>
+        </q-card>
+    </q-dialog>
+
+    <!-- Scan Prebatch Dialog (Workflow Controller) -->
+    <q-dialog v-model="showScanDialog">
+        <q-card style="min-width: 580px; max-width: 720px;">
+            <!-- Header with progress -->
+            <q-card-section class="bg-blue-9 text-white row items-center q-pb-xs">
+                <q-icon name="qr_code_scanner" size="sm" class="q-mr-sm" />
+                <div class="text-h6">Prebatch Workflow</div>
+                <q-space />
+                <q-badge v-if="scanProgress.total > 0" color="white" text-color="blue-9" class="text-weight-bold q-mr-sm">
+                    {{ scanProgress.done }} / {{ scanProgress.total }}
+                </q-badge>
+                <q-btn icon="close" flat round dense v-close-popup />
+            </q-card-section>
+            <q-linear-progress v-if="scanProgress.total > 0" :value="scanProgress.done / scanProgress.total" color="green" track-color="blue-7" size="4px" />
+
+            <!-- Ingredient Info Header -->
+            <q-card-section v-if="scanDialogIngInfo" class="bg-blue-1 q-py-sm">
+                <div class="row items-center q-gutter-md">
+                    <div>
+                        <div class="text-caption text-grey-7">Ingredient</div>
+                        <div class="text-subtitle1 text-weight-bold text-blue-9">{{ scanDialogIngInfo.ingredient_name }}</div>
+                    </div>
+                    <div>
+                        <div class="text-caption text-grey-7">MAT SAP Code</div>
+                        <div class="text-subtitle2 text-weight-bold">{{ scanDialogIngInfo.mat_sap_code }}</div>
+                    </div>
+                    <div>
+                        <div class="text-caption text-grey-7">Total Require</div>
+                        <div class="text-subtitle2 text-weight-bold text-orange-9">{{ scanDialogIngInfo.total_require.toFixed(4) }} kg</div>
+                    </div>
+                </div>
+            </q-card-section>
+
+            <!-- Step 3: Scan Intake Lot Label -->
+            <q-card-section class="q-py-sm">
+                <!-- FIFO Recommended Lot -->
+                <div v-if="fifoRecommendedLot" class="q-mb-sm q-pa-sm rounded-borders" style="background: #e8f5e9; border-left: 4px solid #4caf50;">
+                    <div class="row items-center q-gutter-sm">
+                        <q-icon name="inventory_2" color="green-9" size="sm" />
+                        <div class="col">
+                            <div class="text-caption text-grey-7">Use this Intake Lot (FIFO)</div>
+                            <div class="text-subtitle2 text-weight-bold text-green-9">
+                                {{ fifoRecommendedLot.intake_lot_id }}
+                            </div>
+                        </div>
+                        <div class="text-right">
+                            <div class="text-caption text-grey-7">Exp: {{ formatDate(fifoRecommendedLot.expire_date) }}</div>
+                            <div class="text-caption text-weight-bold">Remain: {{ fifoRecommendedLot.remain_vol?.toFixed(2) }} kg</div>
+                        </div>
+                    </div>
+                </div>
+                <div v-else class="q-mb-sm q-pa-xs rounded-borders bg-orange-1 text-center">
+                    <q-icon name="warning" color="orange-9" size="xs" class="q-mr-xs" />
+                    <span class="text-caption text-orange-9 text-weight-bold">No active inventory found for this ingredient</span>
+                </div>
+                <div class="text-caption text-weight-bold text-grey-7 q-mb-xs">
+                    <q-icon name="arrow_right" size="xs" /> {{ currentPackageOrigins.length > 0 ? 'Scan Next Lot (multi-lot)' : 'Scan Intake Lot Label' }}
+                </div>
+                <q-input
+                    v-model="scanLotInput"
+                    outlined
+                    dense
+                    autofocus
+                    placeholder="Scan intake lot label (e.g. LB-26-004205)"
+                    @keyup.enter="onScanLotEnter"
+                    bg-color="white"
+                    :error="!!scanLotError"
+                    :error-message="scanLotError"
+                >
+                    <template v-slot:prepend>
+                        <q-icon name="qr_code_scanner" color="blue-9" />
+                    </template>
+                    <template v-slot:append>
+                        <q-icon v-if="scanLotValidated" name="check_circle" color="green" />
+                    </template>
+                </q-input>
+                <div v-if="selectedIntakeLotId && scanLotValidated" class="q-mt-xs">
+                    <q-chip color="green-1" text-color="green-9" icon="check_circle" dense>
+                        {{ selectedIntakeLotId }} — Ready
+                    </q-chip>
+                </div>
+            </q-card-section>
+
+            <!-- Loading -->
+            <q-card-section v-if="scanDialogLoading" class="text-center q-py-lg">
+                <q-spinner-dots size="40px" color="blue-9" />
+                <div class="text-caption q-mt-sm">Loading prebatch items...</div>
+            </q-card-section>
+
+            <!-- Tree of items grouped by Plan -->
+            <q-card-section v-else class="q-pa-sm" style="max-height: 350px; overflow-y: auto;">
+                <div v-if="scanDialogTree.length === 0" class="text-center text-grey-6 q-py-md">
+                    No items found. Select an ingredient first.
+                </div>
+                <div v-for="group in scanDialogTree" :key="group.plan_id" class="q-mb-sm">
+                    <div class="text-caption text-weight-bold text-blue-grey-7 q-px-xs q-py-xs bg-grey-2 rounded-borders">
+                        <q-icon name="folder" size="xs" class="q-mr-xs" />
+                        {{ group.plan_id }}
+                    </div>
+                    <q-list dense separator>
+                        <q-item
+                            v-for="(item, idx) in group.items"
+                            :key="item.batch_id"
+                            :clickable="item.status !== 2 && scanLotValidated"
+                            :class="[
+                                item.status === 2 ? 'bg-green-1 text-grey-6' : '',
+                                item === nextPendingItem && scanLotValidated ? 'bg-amber-1' : '',
+                                item.status !== 2 && scanLotValidated ? 'cursor-pointer' : ''
+                            ]"
+                            @click="scanLotValidated && onScanItemSelect(item)"
+                            class="q-pl-lg"
+                        >
+                            <q-item-section avatar>
+                                <q-icon
+                                    :name="item.status === 2 ? 'check_circle' : (item === nextPendingItem ? 'arrow_right' : 'radio_button_unchecked')"
+                                    :color="item.status === 2 ? 'green' : (item === nextPendingItem ? 'orange-9' : 'grey-5')"
+                                    size="xs"
+                                />
+                            </q-item-section>
+                            <q-item-section>
+                                <q-item-label class="text-weight-medium" style="font-size: 0.8rem;">
+                                    {{ item.batch_id }}
+                                </q-item-label>
+                                <q-item-label caption>
+                                    Require: {{ item.required_volume.toFixed(4) }} kg
+                                    <span v-if="item.actual_volume > 0" class="text-blue-9 text-weight-bold q-ml-sm">
+                                        Packed: {{ item.actual_volume.toFixed(4) }} kg
+                                    </span>
+                                </q-item-label>
+                            </q-item-section>
+                            <q-item-section side>
+                                <q-badge
+                                    :color="item.status === 2 ? 'green' : (item.status === 1 ? 'orange' : 'grey-5')"
+                                    :label="item.status === 2 ? 'Done' : (item.status === 1 ? 'Batch' : 'Wait')"
+                                    size="sm"
+                                />
+                            </q-item-section>
+                        </q-item>
+                    </q-list>
+                </div>
+            </q-card-section>
+
+            <!-- All done message -->
+            <q-card-section v-if="scanProgress.total > 0 && scanProgress.done === scanProgress.total" class="bg-green-1 text-center q-py-sm">
+                <q-icon name="celebration" color="green" size="md" />
+                <div class="text-weight-bold text-green-9">All batches completed!</div>
+            </q-card-section>
+        </q-card>
+    </q-dialog>
+
+    <!-- Rebatch Confirmation Dialog -->
+    <q-dialog v-model="showRebatchDialog" persistent>
+        <q-card style="min-width: 420px; max-width: 520px">
+            <q-card-section class="bg-orange-9 text-white row items-center">
+                <q-icon name="edit" size="sm" class="q-mr-sm" />
+                <div class="text-h6">Rebatch Confirmation</div>
+                <q-space />
+                <q-btn icon="close" flat round dense v-close-popup />
+            </q-card-section>
+
+            <q-card-section class="q-pa-md">
+                <div v-if="rebatchTarget" class="q-mb-md">
+                    <div class="text-subtitle2 text-grey-8 q-mb-xs">
+                        Cancel and re-weigh this item:
+                    </div>
+                    <div class="text-body1 text-weight-bold text-blue-9">
+                        {{ rebatchTarget.batch_id }} — {{ rebatchIng?.re_code }}
+                    </div>
+                    <div class="text-caption text-grey-6 q-mt-xs">
+                        Current weight: {{ rebatchTarget.actual_volume?.toFixed(4) }} kg
+                    </div>
+                </div>
+                <q-select
+                    v-model="rebatchReason"
+                    :options="rebatchReasonOptions"
+                    outlined
+                    dense
+                    label="Select reason *"
+                    emit-value
+                    map-options
+                >
+                    <template v-slot:prepend>
+                        <q-icon name="warning_amber" color="orange-9" />
+                    </template>
+                </q-select>
+                <q-input
+                    v-if="rebatchReason === 'Other'"
+                    v-model="rebatchRemark"
+                    outlined
+                    dense
+                    type="textarea"
+                    rows="2"
+                    label="Please specify *"
+                    placeholder="Enter the reason..."
+                    class="q-mt-sm"
+                    :rules="[(val: string) => !!val.trim() || 'Please specify the reason']"
+                />
+            </q-card-section>
+
+            <q-card-actions align="right" class="q-pa-md bg-grey-1">
+                <q-btn label="Cancel" flat color="grey-7" v-close-popup />
+                <q-btn
+                    label="Confirm Rebatch"
+                    color="orange-9"
+                    unelevated
+                    icon="edit"
+                    :disable="!rebatchFinalRemark"
+                    @click="confirmRebatch"
                 />
             </q-card-actions>
         </q-card>
