@@ -16,6 +16,7 @@ from .router_warehouses import router as warehouses_router
 from .router_translations import router as translations_router
 from .router_stock_adjustments import router as stock_adjustments_router
 from .router_reports import router as reports_router
+from .router_db_sync import router as db_sync_router
 
 __all__ = [
     "auth_router",
@@ -29,5 +30,6 @@ __all__ = [
     "warehouses_router",
     "translations_router",
     "stock_adjustments_router",
-    "reports_router"
+    "reports_router",
+    "db_sync_router"
 ]

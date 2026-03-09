@@ -21,6 +21,63 @@ const formatDateTime = (date: any) => {
   return d.toLocaleString('en-GB')
 }
 
+// ── DB Sync State ──
+const syncLoading = ref<string | null>(null) // 'cloud-to-remote' | 'remote-to-cloud' | null
+const syncLog = ref<string[]>([])
+const syncDialog = ref(false)
+const dbStatus = ref<any>(null)
+const dbStatusLoading = ref(false)
+
+const fetchDbStatus = async () => {
+  dbStatusLoading.value = true
+  try {
+    const data = await $fetch<any>(`${appConfig.apiBaseUrl}/db-sync/status`)
+    dbStatus.value = data
+  } catch (e) {
+    console.error('DB status error:', e)
+  } finally {
+    dbStatusLoading.value = false
+  }
+}
+
+const handleSync = async (direction: 'cloud-to-remote' | 'remote-to-cloud') => {
+  const label = direction === 'cloud-to-remote'
+    ? 'Cloud → Remote'
+    : 'Remote → Cloud'
+
+  $q.dialog({
+    title: 'Confirm Database Sync',
+    message: `Are you sure you want to sync <b>${label}</b>?<br><br>This will <b>overwrite all data</b> on the target database.`,
+    html: true,
+    cancel: true,
+    persistent: true,
+    ok: { label: 'Sync Now', color: 'negative', icon: 'sync' },
+  }).onOk(async () => {
+    syncLoading.value = direction
+    syncLog.value = [`Starting sync: ${label}...`]
+    syncDialog.value = true
+
+    try {
+      const data = await $fetch<any>(`${appConfig.apiBaseUrl}/db-sync/${direction}`, { method: 'POST', timeout: 120000 })
+      syncLog.value = data.log || []
+      syncLog.value.push(``, `══════════════════════════════`)
+      syncLog.value.push(`✅ Sync complete: ${data.tables_synced} tables, ${data.views_synced} views, ${data.total_rows} rows`)
+
+      $q.notify({ type: 'positive', message: `Sync complete: ${label}`, caption: `${data.tables_synced} tables, ${data.total_rows} rows` })
+      fetchDbStatus()
+    } catch (e: any) {
+      syncLog.value.push(`❌ Error: ${e?.data?.detail || e?.message || 'Unknown error'}`)
+      $q.notify({ type: 'negative', message: `Sync failed: ${label}`, caption: e?.data?.detail || e?.message })
+    } finally {
+      syncLoading.value = null
+    }
+  })
+}
+
+onMounted(() => {
+  fetchDbStatus()
+})
+
 interface MetricPoint {
   timestamp: string
   value: number
@@ -258,8 +315,86 @@ onUnmounted(() => {
                 />
               </q-card-section>
             </q-card>
+
+            <!-- Database Sync Card -->
+            <q-card flat bordered class="bg-teal-9 text-white">
+              <q-card-section>
+                <div class="text-subtitle1 text-weight-bold flex items-center">
+                  <q-icon name="sync" class="q-mr-xs" />
+                  Database Sync
+                  <q-spacer />
+                  <q-btn flat round dense icon="refresh" size="sm" @click="fetchDbStatus" :loading="dbStatusLoading" />
+                </div>
+              </q-card-section>
+              <q-card-section class="q-pt-none">
+                <!-- Connection Status -->
+                <div v-if="dbStatus" class="q-mb-md">
+                  <div class="q-mb-xs row items-center">
+                    <q-icon :name="dbStatus.cloud?.status === 'connected' ? 'cloud_done' : 'cloud_off'" :color="dbStatus.cloud?.status === 'connected' ? 'green-4' : 'red-4'" size="xs" class="q-mr-xs" />
+                    <span class="text-caption">Cloud ({{ dbStatus.cloud?.host }})</span>
+                    <q-spacer />
+                    <q-badge :color="dbStatus.cloud?.status === 'connected' ? 'green' : 'red'" :label="dbStatus.cloud?.status === 'connected' ? `${dbStatus.cloud.tables} tables` : 'offline'" />
+                  </div>
+                  <div class="row items-center">
+                    <q-icon :name="dbStatus.remote?.status === 'connected' ? 'dns' : 'report_problem'" :color="dbStatus.remote?.status === 'connected' ? 'green-4' : 'red-4'" size="xs" class="q-mr-xs" />
+                    <span class="text-caption">Remote ({{ dbStatus.remote?.host }})</span>
+                    <q-spacer />
+                    <q-badge :color="dbStatus.remote?.status === 'connected' ? 'green' : 'red'" :label="dbStatus.remote?.status === 'connected' ? `${dbStatus.remote.tables} tables` : 'offline'" />
+                  </div>
+                </div>
+
+                <!-- Sync Buttons -->
+                <q-btn
+                  icon="cloud_upload"
+                  label="Remote → Cloud"
+                  color="amber-8"
+                  class="full-width q-mb-sm"
+                  dense
+                  no-caps
+                  :loading="syncLoading === 'remote-to-cloud'"
+                  :disable="!!syncLoading"
+                  @click="handleSync('remote-to-cloud')"
+                />
+                <q-btn
+                  icon="cloud_download"
+                  label="Cloud → Remote"
+                  color="light-blue-8"
+                  class="full-width"
+                  dense
+                  no-caps
+                  :loading="syncLoading === 'cloud-to-remote'"
+                  :disable="!!syncLoading"
+                  @click="handleSync('cloud-to-remote')"
+                />
+              </q-card-section>
+            </q-card>
           </div>
         </div>
+
+        <!-- Sync Log Dialog -->
+        <q-dialog v-model="syncDialog" persistent>
+          <q-card style="min-width: 500px; max-width: 700px;">
+            <q-card-section class="row items-center q-pb-none">
+              <div class="text-h6">
+                <q-icon name="sync" class="q-mr-xs" />
+                Sync Log
+              </div>
+              <q-spacer />
+              <q-btn v-if="!syncLoading" icon="close" flat round dense v-close-popup />
+            </q-card-section>
+            <q-card-section>
+              <q-linear-progress v-if="syncLoading" indeterminate color="primary" class="q-mb-md" />
+              <div class="bg-grey-10 text-green-4 q-pa-md rounded-borders" style="font-family: monospace; font-size: 0.8rem; max-height: 400px; overflow-y: auto;">
+                <div v-for="(line, i) in syncLog" :key="i" :class="{ 'text-red-4': line.startsWith('✗') || line.startsWith('❌'), 'text-green-4': line.startsWith('✓') || line.startsWith('✅') }">
+                  {{ line }}
+                </div>
+              </div>
+            </q-card-section>
+            <q-card-actions align="right" v-if="!syncLoading">
+              <q-btn flat label="Close" color="primary" v-close-popup />
+            </q-card-actions>
+          </q-card>
+        </q-dialog>
 
         <!-- Right Content: Metrics and Charts -->
         <div class="col-12 col-md-9">
