@@ -247,16 +247,29 @@ const sppWeight = computed(() =>
 )
 const totalWeight = computed(() => fhWeight.value + sppWeight.value)
 
-/** Check if all bags are packed per warehouse */
+/** Check if all bags are packed per warehouse — must match requirement count */
 const fhPackedCount = computed(() => bagsByWarehouse.value.FH.filter(b => isPacked(b)).length)
 const sppPackedCount = computed(() => bagsByWarehouse.value.SPP.filter(b => isPacked(b)).length)
-const allFhPacked = computed(() => bagsByWarehouse.value.FH.length > 0 && fhPackedCount.value === bagsByWarehouse.value.FH.length)
-const allSppPacked = computed(() => bagsByWarehouse.value.SPP.length > 0 && sppPackedCount.value === bagsByWarehouse.value.SPP.length)
+
+// Count required ingredients per WH from batch.reqs (not from records)
+const fhRequiredCount = computed(() => {
+  if (!selectedBatch.value) return 0
+  return (selectedBatch.value.reqs || []).filter((r: any) => isFH(r.wh || '')).length
+})
+const sppRequiredCount = computed(() => {
+  if (!selectedBatch.value) return 0
+  return (selectedBatch.value.reqs || []).filter((r: any) => isSPP(r.wh || '')).length
+})
+
+// Box is complete ONLY when packed count matches required count (not just existing records)
+const allFhPacked = computed(() => fhRequiredCount.value > 0 && fhPackedCount.value >= fhRequiredCount.value)
+const allSppPacked = computed(() => sppRequiredCount.value > 0 && sppPackedCount.value >= sppRequiredCount.value)
 
 /** Group bags by ingredient re_code within selected warehouse for requirement list */
 interface IngredientReq {
   re_code: string
   name: string
+  wh: string
   totalVol: number
   packedVol: number
   totalBags: number
@@ -264,12 +277,31 @@ interface IngredientReq {
   bags: any[]
 }
 const ingredientsByDept = computed((): IngredientReq[] => {
-  const whBags = filterMiddleWh.value === 'FH' ? bagsByWarehouse.value.FH : bagsByWarehouse.value.SPP
+  const isAll = filterMiddleWh.value === 'ALL'
+  const isCurrentFH = filterMiddleWh.value === 'FH'
+  const whBags = isAll
+    ? [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
+    : (isCurrentFH ? bagsByWarehouse.value.FH : bagsByWarehouse.value.SPP)
   const map = new Map<string, IngredientReq>()
+
+  // Step 1: Seed from batch requirements so unweighed ingredients appear
+  if (selectedBatch.value) {
+    const reqs = (selectedBatch.value.reqs || []).filter((r: any) =>
+      isAll ? (isFH(r.wh || '') || isSPP(r.wh || '')) : (isCurrentFH ? isFH(r.wh || '') : isSPP(r.wh || ''))
+    )
+    for (const req of reqs) {
+      const code = req.re_code || '?'
+      if (!map.has(code)) {
+        map.set(code, { re_code: code, name: req.ingredient_name || code, wh: req.wh || '', totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
+      }
+    }
+  }
+
+  // Step 2: Overlay with actual packed records
   for (const bag of whBags) {
     const code = bag.re_code || '?'
     if (!map.has(code)) {
-      map.set(code, { re_code: code, name: bag.ingredient_name || code, totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
+      map.set(code, { re_code: code, name: bag.ingredient_name || code, wh: bag.wh || '', totalVol: 0, packedVol: 0, totalBags: 0, packedBags: 0, bags: [] })
     }
     const ing = map.get(code)!
     ing.totalVol += bag.net_volume || 0
@@ -1307,20 +1339,27 @@ onMounted(async () => {
                 <q-list dense separator class="bg-white">
                   <q-expansion-item
                     v-for="ing in ingredientsByDept" :key="ing.re_code"
-                    dense expand-separator
-                    :header-class="ing.packedBags === ing.totalBags ? 'bg-blue-1' : (ing.packedBags > 0 ? 'bg-orange-1' : 'bg-grey-1')"
+                    dense expand-separator default-opened
+                    :header-class="(ing.packedBags === ing.totalBags && ing.totalBags > 0) ? 'bg-blue-1' : (ing.totalBags > 0 ? 'bg-orange-1' : 'bg-grey-1')"
                   >
                     <template v-slot:header>
                       <q-item-section avatar style="min-width:24px">
                         <q-icon
-                          :name="ing.packedBags === ing.totalBags ? 'check_circle' : (ing.packedBags > 0 ? 'hourglass_top' : 'radio_button_unchecked')"
-                          :color="ing.packedBags === ing.totalBags ? 'blue-7' : (ing.packedBags > 0 ? 'orange-7' : 'grey-4')"
+                          :name="(ing.packedBags === ing.totalBags && ing.totalBags > 0) ? 'check_circle' : (ing.totalBags > 0 ? 'hourglass_top' : 'radio_button_unchecked')"
+                          :color="(ing.packedBags === ing.totalBags && ing.totalBags > 0) ? 'blue-7' : (ing.totalBags > 0 ? 'orange-7' : 'grey-4')"
                           size="sm"
                         />
                       </q-item-section>
                       <q-item-section>
                         <q-item-label class="text-weight-bold" style="font-size:0.8rem">
                           {{ ing.re_code }}
+                          <q-badge
+                            v-if="ing.wh"
+                            :color="ing.wh === 'FH' ? 'blue-4' : 'light-blue-4'"
+                            :label="ing.wh"
+                            class="q-ml-xs"
+                            style="font-size:0.55rem; padding: 1px 4px;"
+                          />
                         </q-item-label>
                         <q-item-label caption style="font-size:0.65rem">
                           {{ ing.totalVol.toFixed(3) }} kg
@@ -1328,7 +1367,7 @@ onMounted(async () => {
                       </q-item-section>
                       <q-item-section side>
                         <q-badge
-                          :color="ing.packedBags === ing.totalBags ? 'blue-7' : (ing.packedBags > 0 ? 'orange-7' : 'grey-4')"
+                          :color="(ing.packedBags === ing.totalBags && ing.totalBags > 0) ? 'blue-7' : (ing.totalBags > 0 ? 'orange-7' : 'grey-4')"
                           class="text-weight-bold"
                           style="font-size:0.65rem"
                         >
