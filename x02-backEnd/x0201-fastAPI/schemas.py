@@ -405,6 +405,7 @@ class PreBatchItemPack(BaseModel):
     net_volume: float
     package_no: int = 1
     total_packages: int = 1
+    new_required_volume: Optional[float] = None
     intake_lot_id: Optional[str] = None
     mat_sap_code: Optional[str] = None
     recode_batch_id: Optional[str] = None

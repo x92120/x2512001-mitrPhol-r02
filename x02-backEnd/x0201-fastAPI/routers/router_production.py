@@ -552,6 +552,10 @@ def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depend
     item.intake_lot_id = data.intake_lot_id
     item.mat_sap_code = data.mat_sap_code
     item.recode_batch_id = data.recode_batch_id
+    
+    if data.new_required_volume is not None:
+        item.required_volume = data.new_required_volume
+        
     item.total_volume = item.required_volume
     item.total_request_volume = item.required_volume
     item.weighed_at = datetime.now()

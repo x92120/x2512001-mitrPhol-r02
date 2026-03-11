@@ -203,7 +203,8 @@ export function usePreBatchLabels(deps: LabelDeps) {
                 intake_lot_id: deps.currentPackageOrigins.value[0]?.intake_lot_id || deps.selectedIntakeLotId.value,
                 mat_sap_code: ing?.mat_sap_code || null,
                 recode_batch_id: String(pkgNo).padStart(2, '0'),
-                origins: deps.currentPackageOrigins.value
+                origins: deps.currentPackageOrigins.value,
+                new_required_volume: deps.requireVolume.value
             }
             await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${itemId}/pack`, {
                 method: 'PUT',

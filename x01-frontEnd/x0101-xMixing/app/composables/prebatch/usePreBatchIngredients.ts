@@ -269,22 +269,41 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
         if (deps.selectedReCode.value) {
             const ing = selectableIngredients.value.find(i => i.re_code === deps.selectedReCode.value)
             if (ing) {
-                // Always use per_batch for scale target (single batch amount)
-                const reqVol = ing.per_batch || ing.batch_require || 0
-                deps.requireVolume.value = reqVol
+                // Always use per_batch for scale target base reference
+                const originalReqVol = ing.per_batch || ing.batch_require || 0
+                let pkgSize = deps.packageSize.value
 
-                const stdSize = ing.std_package_size || 0
-                // Auto initial select container size from request volume (cap at standard size if set)
-                if (stdSize > 0) {
-                    deps.packageSize.value = Math.min(reqVol, stdSize)
+                // If no package size selected yet, try to set a sensible default
+                if (pkgSize <= 0) {
+                    const stdSize = ing.std_package_size || 0
+                    if (stdSize > 0) {
+                        pkgSize = Math.min(originalReqVol, stdSize)
+                    } else {
+                        pkgSize = originalReqVol
+                    }
+                    if (pkgSize !== deps.packageSize.value) {
+                        deps.packageSize.value = pkgSize
+                    }
+                }
+
+                if (pkgSize > 0) {
+                    // Recalculate the entire batch requirement based on the current package size
+                    const reqBatches = Math.ceil(originalReqVol / pkgSize)
+                    deps.requireVolume.value = Number((reqBatches * pkgSize).toFixed(5))
                 } else {
-                    deps.packageSize.value = reqVol
+                    deps.requireVolume.value = originalReqVol
                 }
             }
         } else {
             deps.requireVolume.value = 0
         }
     }
+
+    watch(() => deps.packageSize.value, (newVal, oldVal) => {
+        if (newVal !== oldVal && newVal > 0 && deps.selectedReCode.value) {
+            updateRequireVolume()
+        }
+    })
 
     const onIngredientSelect = () => {
         if (deps.selectedReCode.value) {
