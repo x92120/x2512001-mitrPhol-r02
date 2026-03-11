@@ -1552,6 +1552,11 @@ const reopenScanDialogAfterPrint = () => {
                             dense
                             bg-color="white"
                             input-class="text-right"
+                            use-input
+                            fill-input
+                            hide-selected
+                            @filter="(val, update) => update(() => {})"
+                            @new-value="(val, done) => { const n = Number(val); if (!isNaN(n) && n > 0) done(n, 'add-unique'); else done() }"
                         >
                         </q-select>
                     </div>
