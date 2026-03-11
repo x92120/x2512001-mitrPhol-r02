@@ -28,6 +28,7 @@ const scannerLoading = ref(false)
 
 // All available batches for the simulator
 const allBatches = ref<any[]>([])
+const allPlans = ref<any[]>([])
 
 // Label preview in simulator
 const previewLabelSvg = ref('')
@@ -36,6 +37,12 @@ const selectedSimBatch = ref<any>(null)
 
 // Bags from OTHER batches (for wrong-box simulation)
 const otherBatchBagLabels = ref<{svg: string, batch_record_id: string, re_code: string, source_batch: string}[]>([])
+
+// ── Tree navigation state (Left Pane) ──
+const selectedSku = ref<string | null>(null)
+const selectedPlanId = ref<string | null>(null)
+const selectedBatchId = ref<string | null>(null)
+const treeSearch = ref('')
 
 // Feedback overlay
 const feedback = ref<{ show: boolean, type: 'success' | 'error' | 'warning', message: string, title: string }>({
@@ -50,8 +57,8 @@ const wrongBoxAlert = ref<{ show: boolean, bagCode: string, expectedBox: string 
 
 // Sound Settings
 const showSoundSettings = ref(false)
-const successSoundPreset = ref(typeof localStorage !== 'undefined' ? (localStorage.getItem('recheck_success_sound') || 'beep') : 'beep')
-const errorSoundPreset = ref(typeof localStorage !== 'undefined' ? (localStorage.getItem('recheck_error_sound') || 'siren') : 'siren')
+const successSoundPreset = ref(import.meta.client ? (localStorage.getItem('recheck_success_sound') || 'beep') : 'beep')
+const errorSoundPreset = ref(import.meta.client ? (localStorage.getItem('recheck_error_sound') || 'siren') : 'siren')
 
 const successSoundOptions = [
     { value: 'beep', labelKey: 'sound.shortBeep', icon: 'music_note' },
@@ -101,12 +108,108 @@ const allVerified = computed(() => {
 
 // --- Methods ---
 
+// ── Tree Navigation computed ── (Production Plan → Batch_ID)
+const planTree = computed(() => {
+    const needle = treeSearch.value.toLowerCase()
+    let plans = allPlans.value
+    if (needle) {
+        plans = plans.filter((p: any) =>
+            (p.plan_id || '').toLowerCase().includes(needle) ||
+            (p.sku_name || '').toLowerCase().includes(needle) ||
+            (p.sku_id || '').toLowerCase().includes(needle) ||
+            (p.batches || []).some((b: any) => (b.batch_id || '').toLowerCase().includes(needle))
+        )
+    }
+    return plans
+})
+
+const selectedPlanBatches = computed(() => {
+    if (!selectedPlanId.value) return []
+    const plan = planTree.value.find((p: any) => p.plan_id === selectedPlanId.value)
+    return plan?.batches || []
+})
+
+const selectBatchFromTree = (batch: any) => {
+    selectedBatchId.value = batch.batch_id
+    selectedPlanId.value = batch.plan_id || ''
+}
+
+// ── PreBatch data for split card ──
+const batchPreBatchItems = ref<any[]>([])   // Required items (from prebatch_items)
+const batchPackedRecs = ref<any[]>([])       // Packed records (from prebatch_recs)
+const prebatchLoading = ref(false)
+
+const fetchBatchPreBatchData = async (batchId: string) => {
+    prebatchLoading.value = true
+    try {
+        const [items, recs] = await Promise.all([
+            $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-items/by-batch/${batchId}`, {
+                headers: getAuthHeader() as Record<string, string>
+            }).catch(() => []),
+            $fetch<any[]>(`${appConfig.apiBaseUrl}/prebatch-recs/by-batch/${batchId}`, {
+                headers: getAuthHeader() as Record<string, string>
+            }).catch(() => [])
+        ])
+        batchPreBatchItems.value = items || []
+        batchPackedRecs.value = recs || []
+    } catch (e) {
+        console.error('Error fetching prebatch data:', e)
+    } finally {
+        prebatchLoading.value = false
+    }
+}
+
+// Packed items grouped by re_code
+const packedByIngredient = computed(() => {
+    const map: Record<string, { re_code: string, mat_sap_code: string, count: number, total_vol: number, records: any[] }> = {}
+    for (const r of batchPackedRecs.value) {
+        const code = r.re_code || '?'
+        if (!map[code]) map[code] = { re_code: code, mat_sap_code: r.mat_sap_code || '-', count: 0, total_vol: 0, records: [] }
+        map[code].count++
+        map[code].total_vol += (r.net_volume || 0)
+        map[code].records.push(r)
+    }
+    return Object.values(map).sort((a, b) => a.re_code.localeCompare(b.re_code))
+})
+
+// Toggle prebatch item status (Wait ↔ Check)
+const toggleItemStatus = async (item: any) => {
+    const newStatus = item.status >= 2 ? 0 : 2  // Toggle: 0=Wait, 2=Done(Check)
+    try {
+        await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${item.id}/status?status=${newStatus}`, {
+            method: 'PUT',
+            headers: getAuthHeader() as Record<string, string>
+        })
+        item.status = newStatus
+        $q.notify({ type: 'positive', message: `Status → ${newStatus >= 2 ? 'Check ✅' : 'Wait ⏳'}`, position: 'top', timeout: 1000 })
+    } catch (e) {
+        $q.notify({ type: 'negative', message: 'Failed to update status', position: 'top' })
+    }
+}
+
+// Toggle packed record recheck status
+const toggleRecStatus = async (rec: any) => {
+    const newStatus = rec.recheck_status === 1 ? 0 : 1
+    try {
+        await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/${rec.id}/packing-status`, {
+            method: 'PATCH',
+            headers: getAuthHeader() as Record<string, string>,
+            body: { packing_status: newStatus, packed_by: user.value?.username || 'operator' }
+        })
+        rec.recheck_status = newStatus
+    } catch (e) {
+        $q.notify({ type: 'negative', message: 'Failed to update', position: 'top' })
+    }
+}
+
+
 const fetchPlansAndBatches = async () => {
     try {
         const resp = await $fetch<any>(`${appConfig.apiBaseUrl}/production-plans/?status=all`, {
             headers: getAuthHeader() as Record<string, string>
         })
         const plans = resp.plans || resp || []
+        allPlans.value = plans
         const batches: any[] = []
         plans.forEach((p: any) => {
             if (p.batches) {
@@ -130,6 +233,7 @@ const fetchBoxDetails = async (id: string) => {
         boxDetails.value = data
         boxId.value = id
         showFeedback('success', `Box loaded: ${data.total_bags} bags found`, 'BOX SCANNED')
+        fetchBatchPreBatchData(id)
         // Auto-focus bag scan for immediate scanning
         nextTick(() => { bagScanRef.value?.focus() })
     } catch (error: any) {
@@ -558,10 +662,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <q-page class="q-pa-md bg-white">
+  <q-page class="q-pa-sm" style="height: calc(100vh - 56px);">
 
     <!-- ===== PAGE HEADER ===== -->
-    <div class="bg-blue-9 text-white q-pa-md rounded-borders q-mb-md shadow-2">
+    <div class="bg-blue-9 text-white q-pa-sm rounded-borders q-mb-sm shadow-2">
       <div class="row justify-between items-center">
         <div class="row items-center q-gutter-sm">
           <q-icon name="fact_check" size="sm" />
@@ -569,217 +673,209 @@ onMounted(() => {
         </div>
         <div class="row items-center q-gutter-sm">
           <div class="text-caption text-blue-2">{{ t('recheck.subtitle') }}</div>
-          <q-btn flat round dense icon="assessment" color="white" @click="showQCReportDialog = true">
-            <q-tooltip>Quality Check Report</q-tooltip>
-          </q-btn>
-          <q-btn flat round dense icon="volume_up" color="white" @click="showSoundSettings = true">
-            <q-tooltip>{{ t('sound.title') }}</q-tooltip>
-          </q-btn>
+          <q-btn flat round dense icon="assessment" color="white" @click="showQCReportDialog = true"><q-tooltip>QC Report</q-tooltip></q-btn>
+          <q-btn flat round dense icon="volume_up" color="white" @click="showSoundSettings = true"><q-tooltip>{{ t('sound.title') }}</q-tooltip></q-btn>
         </div>
       </div>
     </div>
 
-    <!-- ===== BOX SCAN BAR ===== -->
-    <q-card flat bordered class="q-mb-md shadow-1">
-      <q-card-section class="q-py-sm bg-blue-grey-1">
-        <div class="row items-center q-gutter-sm">
-          <q-icon name="inbox" color="blue-9" />
+    <!-- ===== FULL-WIDTH LAYOUT ===== -->
+    <div style="height: calc(100% - 60px); display: flex; flex-direction: column; gap: 8px;">
+
+      <!-- ── SCAN PACKING BOX ── -->
+      <q-card flat bordered class="shadow-1" style="flex-shrink: 0;">
+        <q-card-section class="q-py-xs bg-blue-grey-1 row items-center q-gutter-xs">
+          <q-icon name="qr_code" color="blue-9" size="xs" />
           <span class="text-subtitle2 text-weight-bold text-blue-9">{{ t('recheck.scanPackingBox') }}</span>
-        </div>
-      </q-card-section>
-      <q-card-section class="q-py-sm">
-        <div class="row q-col-gutter-sm items-center">
-          <div class="col">
-            <q-input
-              v-model="boxScanInput"
-              outlined dense
-              :placeholder="t('recheck.scanBoxPlaceholder')"
-              @keyup.enter="onBoxScanSubmit"
-              autofocus
-              bg-color="white"
-            >
-              <template v-slot:prepend>
-                <q-icon name="qr_code" color="blue-9" />
-              </template>
-              <template v-slot:append>
-                <q-btn icon="document_scanner" flat round dense color="blue-9" @click="openScannerSimulator('box')">
-                  <q-tooltip>{{ t('recheck.openSimulator') }}</q-tooltip>
-                </q-btn>
-              </template>
-            </q-input>
-          </div>
-          <div class="col-auto">
-            <q-btn unelevated color="blue-9" icon="search" :label="t('recheck.loadBox')" @click="onBoxScanSubmit" :loading="loading && !boxDetails" />
-          </div>
-          <div class="col-auto" v-if="boxDetails">
-            <q-btn flat icon="close" :label="t('common.reset')" color="grey-7" @click="resetBox" />
-          </div>
-        </div>
-      </q-card-section>
-    </q-card>
-
-    <!-- ===== BOX LOADED ===== -->
-    <div v-if="boxDetails">
-
-      <!-- Box Info Header -->
-      <q-card flat bordered class="q-mb-md shadow-1 overflow-hidden">
-        <div class="bg-blue-9 text-white q-pa-md row items-center q-col-gutter-md">
-          <div class="col-auto">
-            <q-circular-progress
-              show-value
-              :value="progress * 100"
-              size="80px"
-              :color="allVerified ? 'positive' : 'yellow'"
-              track-color="blue-7"
-              :thickness="0.18"
-            >
-              <span class="text-h6 text-weight-bold text-white">{{ scannedCount }}/{{ totalCount }}</span>
-            </q-circular-progress>
-          </div>
-          <div class="col">
-            <div class="text-caption text-blue-3">Box ID</div>
-            <div class="text-h6 text-weight-bold">{{ boxId }}</div>
-            <div class="text-caption text-blue-2">
-              SKU: {{ boxDetails.sku_id }} &nbsp;|&nbsp; {{ boxDetails.sku_name }} &nbsp;|&nbsp; Plan: {{ boxDetails.plan_id }}
-            </div>
-          </div>
-          <div class="col-auto text-right">
-            <div v-if="allVerified">
-              <q-btn
-                color="positive" size="md"
-                :label="t('recheck.releaseToProduction')"
-                icon="rocket_launch"
-                unelevated
-                class="text-weight-bold pulse-btn"
-                @click="releaseBatch"
-                :loading="loading"
-              />
-              <div class="text-caption text-positive q-mt-xs">{{ t('recheck.allBagsVerified') }}</div>
-            </div>
-            <div v-else class="text-right">
-              <div class="text-h6 text-blue-2">
-                <q-icon name="hourglass_empty" /> {{ totalCount - scannedCount }} {{ t('recheck.remaining') }}
-              </div>
-              <div v-if="errorCount > 0" class="text-caption text-red-3">
-                {{ errorCount }} {{ t('recheck.errorsDetected') }}
-              </div>
-            </div>
-          </div>
-        </div>
-        <q-linear-progress
-          :value="progress"
-          :color="allVerified ? 'positive' : 'yellow'"
-          track-color="blue-8"
-          style="height: 6px"
-        />
-      </q-card>
-
-      <!-- ===== BAG SCAN INPUT ===== -->
-      <q-card flat bordered class="q-mb-md shadow-1">
-        <q-card-section class="q-py-sm bg-blue-grey-1">
-          <div class="row items-center q-gutter-sm">
-            <q-icon name="qr_code_scanner" color="blue-9" />
-            <span class="text-subtitle2 text-weight-bold text-blue-9">{{ t('recheck.scanPackingBag') }}</span>
-            <q-badge color="primary" :label="`${scannedCount} / ${totalCount} ${t('recheck.verified')}`" />
-          </div>
         </q-card-section>
-        <q-card-section class="q-py-sm">
-          <div class="row q-col-gutter-sm items-center">
+        <q-card-section class="q-py-xs">
+          <div class="row q-col-gutter-xs items-center">
             <div class="col">
-              <q-input
-                v-model="bagScanInput"
-                outlined dense
-                :placeholder="t('recheck.scanBagPlaceholder')"
-                @keyup.enter="onBagScanSubmit"
-                ref="bagScanRef"
-                bg-color="white"
-              >
-                <template v-slot:prepend>
-                  <q-icon name="inventory_2" color="primary" />
-                </template>
+              <q-input v-model="boxScanInput" outlined dense :placeholder="t('recheck.scanBoxPlaceholder')" @keyup.enter="onBoxScanSubmit" autofocus bg-color="white" style="font-size: 12px;">
+                <template v-slot:prepend><q-icon name="inbox" color="blue-9" size="xs" /></template>
                 <template v-slot:append>
-                  <q-btn icon="document_scanner" flat round dense color="primary" @click="openScannerSimulator('bag')">
+                  <q-btn flat round dense icon="document_scanner" color="blue-9" @click="openScannerSimulator('box')">
                     <q-tooltip>{{ t('recheck.openSimulator') }}</q-tooltip>
                   </q-btn>
                 </template>
               </q-input>
             </div>
-            <div class="col-auto">
-              <q-btn unelevated color="primary" icon="check" :label="t('common.confirm')" @click="onBagScanSubmit" :loading="loading" />
+            <div>
+              <q-btn unelevated color="blue-9" icon="search" dense @click="onBoxScanSubmit" :loading="loading" />
             </div>
           </div>
         </q-card-section>
       </q-card>
 
-      <!-- Bag List Table -->
-      <q-card flat bordered class="shadow-1">
-        <div class="q-pa-sm bg-primary text-white text-subtitle2 text-weight-bold row items-center justify-between">
-          <div class="row items-center">
-            <q-icon name="inventory_2" class="q-mr-sm" />
-            <span>{{ t('recheck.bagsInBox') }}</span>
+      <!-- ── INFO ROW: SKU / Plan / Batch (visible only after scan) ── -->
+      <div v-if="boxDetails" class="row items-center q-gutter-sm q-px-xs" style="flex-shrink: 0;">
+        <q-badge color="green-8" class="q-pa-xs q-px-sm" style="font-size: 12px;">
+          <q-icon name="inventory_2" size="14px" class="q-mr-xs" />SKU: {{ boxDetails.sku_id }}
+        </q-badge>
+        <q-badge color="teal-7" class="q-pa-xs q-px-sm" style="font-size: 12px;">
+          <q-icon name="assignment" size="14px" class="q-mr-xs" />Plan: {{ boxDetails.plan_id }}
+        </q-badge>
+        <q-badge color="indigo-7" class="q-pa-xs q-px-sm" style="font-size: 12px;">
+          <q-icon name="science" size="14px" class="q-mr-xs" />Batch: {{ boxId }}
+        </q-badge>
+        <q-badge color="blue-grey-7" class="q-pa-xs q-px-sm" style="font-size: 12px;">
+          <q-icon name="local_shipping" size="14px" class="q-mr-xs" />Bags: {{ totalCount }}
+        </q-badge>
+        <q-space />
+        <!-- Verification progress -->
+        <q-badge :color="allVerified ? 'green' : 'orange'" class="q-pa-xs q-px-sm" style="font-size: 12px;">
+          <q-icon :name="allVerified ? 'verified' : 'hourglass_top'" size="14px" class="q-mr-xs" />
+          ✅ {{ scannedCount }} / {{ totalCount }}
+          <template v-if="errorCount > 0"> · ❌ {{ errorCount }}</template>
+        </q-badge>
+      </div>
+
+      <!-- ── PRE BATCH CHECKLIST CARD (fills remaining height) ── -->
+      <q-card flat bordered class="shadow-1" style="flex: 1; overflow: hidden; display: flex; flex-direction: column;">
+        <q-card-section class="bg-blue-grey-9 text-white q-py-xs row items-center justify-between" style="flex-shrink: 0;">
+          <div class="row items-center q-gutter-xs">
+            <q-icon name="checklist_rtl" size="xs" />
+            <span class="text-subtitle2 text-weight-bold">Pre Batch Checklist</span>
           </div>
-          <q-badge color="white" text-color="primary" :label="`${scannedCount} / ${totalCount} OK`" />
+          <div v-if="boxDetails" class="row q-gutter-xs">
+            <q-badge color="teal-7" class="q-pa-xs"><q-icon name="assignment" size="12px" class="q-mr-xs" />{{ boxDetails.plan_id }}</q-badge>
+            <q-badge color="indigo-7" class="q-pa-xs"><q-icon name="science" size="12px" class="q-mr-xs" />{{ boxId }}</q-badge>
+          </div>
+        </q-card-section>
+
+        <div v-if="boxDetails || batchPreBatchItems.length > 0" class="row" style="flex: 1; overflow: hidden;">
+          <!-- LEFT: PreBatch Packing List in Box -->
+          <div class="col-6" style="height: 100%; overflow: auto; border-right: 1px solid #e0e0e0;">
+            <div class="q-pa-xs bg-green-1 text-green-9 text-weight-bold row items-center q-gutter-xs" style="font-size: 11px; position: sticky; top: 0; z-index: 1;">
+              <q-icon name="inventory_2" size="xs" />
+              <span>📦 PreBatch Packing List in Box ({{ batchPackedRecs.length }})</span>
+            </div>
+            <q-inner-loading :showing="prebatchLoading" />
+            <div v-if="batchPackedRecs.length === 0 && !prebatchLoading" class="text-center q-pa-lg text-grey-5">
+              <q-icon name="inbox" size="40px" /><br>
+              <span class="text-caption">No packed items in box</span>
+            </div>
+            <!-- Packed records table -->
+            <q-markup-table v-else flat dense separator="cell" style="font-size: 10px;">
+              <thead class="bg-green-1">
+                <tr>
+                  <th class="text-center" style="width:30px">St</th>
+                  <th class="text-left">RE Code</th>
+                  <th class="text-right">Volume</th>
+                  <th class="text-left">Pkg</th>
+                  <th class="text-center" style="width:40px">Edit</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in batchPackedRecs" :key="r.batch_record_id"
+                  :class="{ 'bg-green-1': r.recheck_status === 1, 'bg-red-1': r.recheck_status === 2 }">
+                  <td class="text-center">
+                    <q-icon :name="r.recheck_status === 1 ? 'check_circle' : (r.recheck_status === 2 ? 'error' : 'radio_button_unchecked')"
+                      :color="r.recheck_status === 1 ? 'green' : (r.recheck_status === 2 ? 'red' : 'grey')" size="14px" />
+                  </td>
+                  <td class="text-weight-medium">{{ r.re_code }}</td>
+                  <td class="text-right">{{ (r.net_volume || 0).toFixed(3) }}</td>
+                  <td>{{ r.package_no || '-' }}/{{ r.total_packages || '-' }}</td>
+                  <td class="text-center">
+                    <q-btn flat round dense size="xs"
+                      :icon="r.recheck_status === 1 ? 'undo' : 'check'"
+                      :color="r.recheck_status === 1 ? 'grey' : 'green'"
+                      @click="toggleRecStatus(r)">
+                      <q-tooltip>{{ r.recheck_status === 1 ? 'Reset' : 'Mark OK' }}</q-tooltip>
+                    </q-btn>
+                  </td>
+                </tr>
+              </tbody>
+            </q-markup-table>
+
+            <!-- Grouped summary -->
+            <div v-if="packedByIngredient.length > 0" class="q-px-xs q-mt-xs">
+              <div class="text-overline text-grey-7 q-px-xs" style="font-size: 9px;">Summary by Ingredient</div>
+              <q-list dense separator>
+                <q-item v-for="g in packedByIngredient" :key="g.re_code" dense class="q-px-sm">
+                  <q-item-section avatar style="min-width: 24px;">
+                    <q-icon name="check_circle" color="green" size="14px" />
+                  </q-item-section>
+                  <q-item-section>
+                    <q-item-label style="font-size: 10px;" class="text-weight-bold">{{ g.re_code }}</q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-item-label style="font-size: 10px;" class="text-green-9">{{ g.count }} packs · {{ g.total_vol.toFixed(3) }} kg</q-item-label>
+                  </q-item-section>
+                </q-item>
+              </q-list>
+            </div>
+          </div>
+
+          <!-- RIGHT: PreBatch Packing List Require -->
+          <div class="col-6" style="height: 100%; overflow: auto;">
+            <div class="q-pa-xs bg-blue-1 text-blue-9 text-weight-bold row items-center q-gutter-xs" style="font-size: 11px; position: sticky; top: 0; z-index: 1;">
+              <q-icon name="checklist" size="xs" />
+              <span>📋 PreBatch Packing List Require ({{ batchPreBatchItems.length }})</span>
+            </div>
+            <q-inner-loading :showing="prebatchLoading" />
+            <div v-if="batchPreBatchItems.length === 0 && !prebatchLoading" class="text-center q-pa-lg text-grey-5">
+              <q-icon name="playlist_add_check" size="40px" /><br>
+              <span class="text-caption">No required items</span>
+            </div>
+            <!-- Required items table -->
+            <q-markup-table v-else flat dense separator="cell" style="font-size: 10px;">
+              <thead class="bg-blue-1">
+                <tr>
+                  <th class="text-left">RE Code</th>
+                  <th class="text-right">Required</th>
+                  <th class="text-center">Status</th>
+                  <th class="text-center" style="width:40px">Edit</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="item in batchPreBatchItems" :key="item.id"
+                  :class="{ 'bg-green-1': item.status >= 2, 'bg-orange-1': item.status === 1 }">
+                  <td class="text-weight-bold">
+                    {{ item.re_code }}
+                    <div class="text-grey-6" style="font-size: 9px;">{{ item.mat_sap_code || '-' }}</div>
+                  </td>
+                  <td class="text-right text-weight-medium">{{ (item.required_volume || item.require_volume || 0).toFixed(3) }} kg</td>
+                  <td class="text-center">
+                    <q-badge dense
+                      :color="item.status >= 2 ? 'green' : (item.status === 1 ? 'orange' : 'grey')"
+                      :label="item.status >= 2 ? 'Check ✅' : (item.status === 1 ? 'In Progress' : 'Wait ⏳')"
+                      style="font-size: 9px; cursor: pointer;"
+                      @click="toggleItemStatus(item)" />
+                  </td>
+                  <td class="text-center">
+                    <q-btn flat round dense size="xs"
+                      :icon="item.status >= 2 ? 'undo' : 'check_circle'"
+                      :color="item.status >= 2 ? 'orange' : 'green'"
+                      @click="toggleItemStatus(item)">
+                      <q-tooltip>{{ item.status >= 2 ? 'Reset → Wait' : 'Mark → Check' }}</q-tooltip>
+                    </q-btn>
+                  </td>
+                </tr>
+              </tbody>
+            </q-markup-table>
+          </div>
         </div>
 
-        <q-markup-table flat dense separator="cell">
-          <thead class="bg-blue-grey-2 text-blue-grey-9">
-            <tr>
-              <th class="text-center" style="width: 50px">{{ t('common.status') }}</th>
-              <th class="text-left">{{ t('recheck.ingredient') }}</th>
-              <th class="text-left">{{ t('recheck.bagBarcode') }}</th>
-              <th class="text-right">{{ t('recheck.target') }}</th>
-              <th class="text-right">{{ t('recheck.actual') }}</th>
-              <th class="text-right">{{ t('recheck.diff') }}</th>
-              <th class="text-left">{{ t('recheck.verifiedBy') }}</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="bag in boxDetails.bags"
-              :key="bag.batch_record_id"
-              :class="{
-                'bg-green-1': bag.status === 1,
-                'bg-red-1':   bag.status === 2,
-                'bg-white':   bag.status === 0
-              }"
-            >
-              <td class="text-center">
-                <q-icon :name="getStatusIcon(bag.status)" :color="getStatusColor(bag.status)" size="20px" />
-              </td>
-              <td class="text-weight-bold">{{ bag.re_code }}</td>
-              <td class="text-caption text-grey-7">{{ bag.batch_record_id }}</td>
-              <td class="text-right">{{ bag.target_volume?.toFixed(3) }}</td>
-              <td class="text-right text-weight-bold" :class="bag.is_valid ? 'text-green-9' : 'text-red-9'">
-                {{ bag.net_volume?.toFixed(3) }}
-              </td>
-              <td class="text-right text-caption" :class="bag.is_valid ? 'text-green-7' : 'text-red-7'">
-                {{ ((bag.net_volume || 0) - (bag.target_volume || 0)).toFixed(3) }}
-                <span class="text-grey-5">(±{{ bag.tolerance?.toFixed(3) }})</span>
-              </td>
-              <td class="text-caption text-grey-7">
-                <span v-if="bag.recheck_by">
-                  {{ bag.recheck_by }}<br />
-                  <span class="text-grey-5">{{ new Date(bag.recheck_at).toLocaleString('en-GB') }}</span>
-                </span>
-                <span v-else class="text-grey-4">—</span>
-              </td>
-            </tr>
-          </tbody>
-        </q-markup-table>
-      </q-card>
-    </div>
+        <!-- Empty state inside card -->
+        <div v-else style="flex: 1; display: flex; align-items: center; justify-content: center;">
+          <div class="text-center q-pa-lg">
+            <q-icon name="outbox" size="60px" color="blue-grey-3" />
+            <div class="text-body1 text-grey-5 q-mt-sm">{{ t('recheck.scanToBegin') }}</div>
+            <div class="text-caption text-grey-4">{{ t('recheck.loadBoxToVerify') }}</div>
+            <q-btn class="q-mt-sm" icon="document_scanner" :label="t('recheck.openSimulator')" unelevated color="blue-9" size="sm" @click="openScannerSimulator('box')" />
+          </div>
+        </div>
 
-    <!-- ===== EMPTY STATE ===== -->
-    <div v-else class="text-center q-pa-xl">
-      <q-icon name="outbox" size="120px" color="blue-grey-3" />
-      <div class="text-h5 text-grey-6 text-weight-light q-mt-md">{{ t('recheck.scanToBegin') }}</div>
-      <div class="text-body2 text-grey-5 q-mb-lg">{{ t('recheck.loadBoxToVerify') }}</div>
-      <q-btn
-        icon="document_scanner"
-        :label="t('recheck.openSimulator')"
-        unelevated color="blue-9"
-        @click="openScannerSimulator('box')"
-      />
+        <!-- Release to Production footer (shows when all verified) -->
+        <q-card-section v-if="boxDetails && allVerified" class="bg-green-1 q-py-sm text-center" style="flex-shrink: 0; border-top: 2px solid #4caf50;">
+          <div class="row items-center justify-center q-gutter-sm">
+            <q-icon name="verified" size="24px" color="green" />
+            <span class="text-subtitle2 text-green-9 text-weight-bold">{{ t('recheck.allBagsVerified') }}</span>
+            <q-btn color="positive" size="md" :label="t('recheck.releaseToProduction')" icon="rocket_launch" unelevated class="text-weight-bold q-ml-md" @click="releaseBatch" :loading="loading" />
+          </div>
+        </q-card-section>
+      </q-card>
     </div>
 
     <!-- ===== SCANNER SIMULATOR DIALOG ===== -->
@@ -796,9 +892,9 @@ onMounted(() => {
         </q-bar>
 
         <q-card-section class="row q-col-gutter-md" style="height: calc(100vh - 50px); overflow: auto;">
-          <!-- Left: Batch Selector -->
+          <!-- Left: Packing Box Labels -->
           <div class="col-12 col-md-3">
-            <div class="text-overline text-blue-3 q-mb-sm">{{ t('recheck.selectBatch') }}</div>
+            <div class="text-overline text-blue-3 q-mb-sm">📦 PACKING BOX LABELS</div>
             <q-list dark separator dense class="rounded-borders" style="background: rgba(255,255,255,0.05)">
               <q-item
                 v-for="batch in allBatches"
