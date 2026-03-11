@@ -1539,9 +1539,9 @@ const reopenScanDialogAfterPrint = () => {
 
                     <!-- Container Size -->
                     <div class="col-12 col-md-3">
-                        <div class="text-subtitle2 q-mb-xs text-no-wrap row items-center">
+                        <div class="text-subtitle2 q-mb-xs text-no-wrap">
                             Container Size (kg)
-                            <q-btn flat dense round icon="settings" size="xs" color="grey-6" class="q-ml-sm" @click="showContainerSizeDialog = true">
+                            <q-btn flat dense round icon="settings" size="xs" color="grey-6" style="margin-top: -4px" @click="showContainerSizeDialog = true">
                                 <q-tooltip>Manage Sizes</q-tooltip>
                             </q-btn>
                         </div>
