@@ -6,7 +6,7 @@ Ingredient management and intake list endpoints.
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 import csv
 import io
