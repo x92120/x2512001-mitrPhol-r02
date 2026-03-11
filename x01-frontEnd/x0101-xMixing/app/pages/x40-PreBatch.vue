@@ -932,12 +932,22 @@ const onScanItemSelect = (item: any) => {
  * Called from onPrintLabel after a successful save
  */
 const reopenScanDialogAfterPrint = () => {
-  // Small delay so label dialog closes smoothly
   setTimeout(() => {
     if (selectedReCode.value) {
       openScanDialog()
     }
   }, 500)
+}
+
+const refreshPlanData = async () => {
+    if (selectedProductionPlan.value) {
+        $q.notify({ type: 'info', message: 'Refreshing data...', position: 'top', timeout: 500 })
+        await fetchPrebatchItems(selectedProductionPlan.value)
+        if (selectedReCode.value) {
+            await fetchIngredientBatchDetail(selectedReCode.value)
+        }
+        await fetchPreBatchRecords()
+    }
 }
 </script>
 <template>
@@ -1098,6 +1108,17 @@ const reopenScanDialogAfterPrint = () => {
                         <q-badge color="blue-grey-6" text-color="white" class="text-weight-bold">
                             {{ selectableIngredients.length }} {{ t('preBatch.items') }}
                         </q-badge>
+                        <q-btn 
+                            v-if="selectableIngredients.length > 0" 
+                            flat round dense 
+                            icon="refresh" 
+                            size="sm" 
+                            color="blue-grey-8" 
+                            class="q-ml-xs" 
+                            @click="refreshPlanData"
+                        >
+                            <q-tooltip>Refresh Data</q-tooltip>
+                        </q-btn>
                         <q-btn 
                             v-if="selectableIngredients.length > 0" 
                             flat round dense 
