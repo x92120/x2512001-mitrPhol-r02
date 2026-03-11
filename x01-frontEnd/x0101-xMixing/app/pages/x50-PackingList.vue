@@ -1024,14 +1024,14 @@ const processBagScan = async (rawScan: string) => {
     if (!rawScan.includes(',')) {
       scanBatchId.value = rawScan.trim()
       await onScanBatchEnter()
-      if (selectedBatch.value) return // Was purely a box select scan
+      if (selectedBatch.value) return true // Was purely a box select scan
     }
     
     if (!selectedBatch.value) {
       playSound('wrong')
       $q.notify({ type: 'negative', message: t('packingList.selectBatchFirst'), icon: 'warning', position: 'top' })
     }
-    return
+    return false
   }
 
   // 4) Try to find the exact bag in the selected batch
@@ -1069,7 +1069,7 @@ const processBagScan = async (rawScan: string) => {
   if (!bag && !item) {
     playSound('wrong')
     $q.notify({ type: 'negative', icon: 'error', message: t('packingList.bagNotFound'), caption: barcode, position: 'top', timeout: 3000 })
-    return
+    return false
   }
 
   // 5) Auto-fill Department (FH / SPP) based on scanned ingredient
@@ -1112,6 +1112,7 @@ const processBagScan = async (rawScan: string) => {
       }
     }
   }
+  return true
 }
 
 /** Handle scan input from FH/SPP scan fields via Keyboard */
@@ -1120,6 +1121,7 @@ const onScanInputEnter = async (wh: 'FH' | 'SPP') => {
   if (scanValue) {
     await processBagScan(scanValue)
   }
+  // Always clear the input after processing, whether successful or not
   if (wh === 'FH') scanFH.value = ''
   else scanSPP.value = ''
 }
