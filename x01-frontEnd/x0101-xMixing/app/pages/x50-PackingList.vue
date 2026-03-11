@@ -988,12 +988,25 @@ const processBagScan = async (rawScan: string) => {
   let barcode = rawScan
   let inferredBatchId = null
 
-  // 1) Parse comma-separated barcode format (e.g. PlanID,PreBatchID,,ReCode,Weight)
+  // 1) Parse comma-separated barcode format:
+  //    seq, batchId, concatPrebatchId, reCode, weight
+  //    e.g. "9,P260311-03-03-001,P260311-03-03-001FV021A01,FV021A,2"
+  //    → prebatch_id = "P260311-03-03-001-FV021A-01"
   if (rawScan.includes(',')) {
     const parts = rawScan.split(',')
-    if (parts.length > 2) {
-      inferredBatchId = parts[1]?.trim() || ''
-      barcode = parts[2]?.trim() || ''
+    if (parts.length >= 4) {
+      const batchId = parts[1]?.trim() || ''
+      const concatId = parts[2]?.trim() || ''
+      const reCode = parts[3]?.trim() || ''
+      inferredBatchId = batchId
+
+      // Reconstruct prebatch_id with dashes: batchId-reCode-recodeBatchId
+      if (batchId && reCode && concatId) {
+        const suffix = concatId.replace(batchId, '').replace(reCode, '')
+        barcode = `${batchId}-${reCode}-${suffix}`
+      } else {
+        barcode = concatId || batchId
+      }
     } else if (parts.length > 1) {
       barcode = parts[1]?.trim() || ''
     }
@@ -1039,8 +1052,8 @@ const processBagScan = async (rawScan: string) => {
   const allBags = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
 
   const searchForBag = (searchCode: string) => {
-    let b = allBags.find(x => x.batch_record_id === searchCode || x.id?.toString() === searchCode || x.intake_id === searchCode)
-    let i = batchReqs.find((r: any) => r.batch_record_id === searchCode)
+    let b = allBags.find(x => x.batch_record_id === searchCode || x.prebatch_id === searchCode || x.id?.toString() === searchCode || x.intake_id === searchCode)
+    let i = batchReqs.find((r: any) => r.batch_record_id === searchCode || r.prebatch_id === searchCode)
     return { b, i }
   }
 
