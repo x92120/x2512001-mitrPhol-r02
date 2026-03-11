@@ -539,14 +539,13 @@ def update_item_status(item_id: int, status: int, db: Session = Depends(get_db))
 
 @router.put("/prebatch-items/{item_id}/pack")
 def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depends(get_db)):
-    """Pack (weigh) an item — fills in packing fields on the existing row."""
+    """Pack (weigh) an item — creates a PreBatchRec for each package and accumulates net_volume."""
     item = db.query(models.PreBatchItem).filter(models.PreBatchItem.id == item_id).first()
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
 
-    # Fill packing fields
+    # Update item metadata (keep latest batch_record_id / package info)
     item.batch_record_id = data.batch_record_id
-    item.net_volume = data.net_volume
     item.package_no = data.package_no
     item.total_packages = data.total_packages
     item.intake_lot_id = data.intake_lot_id
@@ -556,6 +555,8 @@ def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depend
     if data.new_required_volume is not None:
         item.required_volume = data.new_required_volume
         
+    # ACCUMULATE net_volume instead of overwriting
+    item.net_volume = (item.net_volume or 0) + (data.net_volume or 0)
     item.total_volume = item.required_volume
     item.total_request_volume = item.required_volume
     item.weighed_at = datetime.now()
@@ -564,13 +565,57 @@ def pack_item(item_id: int, data: schemas.PreBatchItemPack, db: Session = Depend
     if item.recode_batch_id and item.re_code and item.batch_id:
         item.prebatch_id = f"{item.batch_id}{item.re_code}{item.recode_batch_id}"
 
-    # Mark as completed
-    if data.package_no >= data.total_packages:
-        item.status = 2
-    elif item.status == 0:
-        item.status = 1
+    # Create a PreBatchRec child record for this individual package
+    # (so frontend can display each package separately)
+    req = db.query(models.PreBatchReq).filter(
+        models.PreBatchReq.batch_id == item.batch_id,
+        models.PreBatchReq.re_code == item.re_code,
+    ).first()
+    
+    db_rec = models.PreBatchRec(
+        req_id=req.id if req else None,
+        batch_record_id=data.batch_record_id,
+        plan_id=item.plan_id,
+        re_code=item.re_code,
+        mat_sap_code=data.mat_sap_code,
+        package_no=data.package_no,
+        total_packages=data.total_packages,
+        net_volume=data.net_volume,
+        total_volume=item.required_volume,
+        total_request_volume=item.required_volume,
+        intake_lot_id=data.intake_lot_id,
+        prebatch_id=item.prebatch_id,
+        recode_batch_id=data.recode_batch_id,
+        recheck_status=0,
+        packing_status=0,
+    )
+    db.add(db_rec)
+    db.flush()
 
-    # Add origins (lot traceability)
+    # Also update PreBatchReq status if it exists
+    if req:
+        actual_count = db.query(models.PreBatchRec).filter(
+            models.PreBatchRec.req_id == req.id,
+            models.PreBatchRec.net_volume.isnot(None),
+        ).count()
+        if actual_count >= data.total_packages:
+            req.status = 2  # Completed — ALL packages packed
+        elif req.status == 0:
+            req.status = 1  # In-Progress
+
+    # Mark PreBatchItem status based on actual package count
+    actual_item_pkgs = db.query(models.PreBatchRec).filter(
+        models.PreBatchRec.plan_id == item.plan_id,
+        models.PreBatchRec.re_code == item.re_code,
+        models.PreBatchRec.prebatch_id == item.prebatch_id,
+        models.PreBatchRec.net_volume.isnot(None),
+    ).count()
+    if actual_item_pkgs >= data.total_packages:
+        item.status = 2  # Completed
+    elif item.status == 0:
+        item.status = 1  # In-Progress
+
+    # Add origins (lot traceability) — linked to PreBatchItem
     if data.origins:
         for origin in data.origins:
             db.add(models.PreBatchItemFrom(
