@@ -620,14 +620,20 @@ const onBatchClick = (batch: any, plan: any) => {
   currentBoxScans.value = [] // Clear current scans when a new batch is selected
 }
 
-const onScanBatchEnter = () => {
+const onScanBatchEnter = async () => {
   if (!scanBatchId.value) return
   for (const plan of plans.value) {
     const batch = plan.batches?.find((b: any) => b.batch_id === scanBatchId.value)
     if (batch) {
       selectedBatch.value = batch
       selectedPlan.value = plan
-      fetchBatchRecords(batch.batch_id)
+      
+      // Ensure we immediately load reqs and records before allowing bag verification
+      await Promise.all([
+        fetchBatchReqs(batch),
+        fetchBatchRecords(batch.batch_id)
+      ])
+
       $q.notify({ type: 'positive', message: `Batch ${batch.batch_id} loaded`, position: 'top' })
       currentBoxScans.value = [] // Clear current scans when a new batch is loaded
       return
@@ -1009,7 +1015,7 @@ const processBagScan = async (rawScan: string) => {
   // 3) Auto Select Box if not selected or different from current scan
   if (inferredBatchId && (!selectedBatch.value || selectedBatch.value?.batch_id !== inferredBatchId)) {
     scanBatchId.value = inferredBatchId
-    onScanBatchEnter() // Automatically loads the batch and displays req ingredients
+    await onScanBatchEnter() // Automatically loads the batch and displays req ingredients
   }
 
   // If STILL no batch selected, we cannot proceed
@@ -1017,7 +1023,7 @@ const processBagScan = async (rawScan: string) => {
     // Treat as raw batch ID scan fallback if it wasn't comma separated
     if (!rawScan.includes(',')) {
       scanBatchId.value = rawScan.trim()
-      onScanBatchEnter()
+      await onScanBatchEnter()
       if (selectedBatch.value) return // Was purely a box select scan
     }
     
