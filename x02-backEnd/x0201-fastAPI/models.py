@@ -80,7 +80,8 @@ class PackageContainerType(Base):
 class PackageContainerSize(Base):
     __tablename__ = "package_container_sizes"
     id = Column(Integer, primary_key=True, index=True)
-    size = Column(Float, unique=True, nullable=False)
+    size = Column(Float, nullable=False)
+    container_type = Column(String(50), nullable=True, default="Bag")
     created_at = Column(TIMESTAMP, server_default=text("CURRENT_TIMESTAMP"))
 
 

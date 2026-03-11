@@ -146,9 +146,12 @@ def delete_container_type(db: Session, type_id: int) -> bool:
     return False
 
 # Package Container Size CRUD
-def get_container_sizes(db: Session) -> List[models.PackageContainerSize]:
+def get_container_sizes(db: Session, container_type: Optional[str] = None) -> List[models.PackageContainerSize]:
     """Get all package container sizes"""
-    return db.query(models.PackageContainerSize).order_by(models.PackageContainerSize.size).all()
+    query = db.query(models.PackageContainerSize)
+    if container_type:
+        query = query.filter(models.PackageContainerSize.container_type == container_type)
+    return query.order_by(models.PackageContainerSize.size).all()
 
 def create_container_size(db: Session, data: schemas.PackageContainerSizeCreate) -> models.PackageContainerSize:
     """Create new package container size"""
@@ -163,6 +166,7 @@ def update_container_size(db: Session, size_id: int, data: schemas.PackageContai
     db_obj = db.query(models.PackageContainerSize).filter(models.PackageContainerSize.id == size_id).first()
     if db_obj:
         db_obj.size = data.size
+        db_obj.container_type = data.container_type
         db.commit()
         db.refresh(db_obj)
     return db_obj

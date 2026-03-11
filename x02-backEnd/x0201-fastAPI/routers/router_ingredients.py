@@ -161,9 +161,9 @@ def delete_container_type(type_id: int, db: Session = Depends(get_db)):
 # =============================================================================
 
 @router.get("/package-container-sizes/", response_model=List[schemas.PackageContainerSize])
-def read_container_sizes(db: Session = Depends(get_db)):
+def read_container_sizes(container_type: Optional[str] = None, db: Session = Depends(get_db)):
     """Get all package container sizes."""
-    return crud.get_container_sizes(db)
+    return crud.get_container_sizes(db, container_type=container_type)
 
 @router.post("/package-container-sizes/", response_model=schemas.PackageContainerSize)
 def create_container_size(data: schemas.PackageContainerSizeCreate, db: Session = Depends(get_db)):

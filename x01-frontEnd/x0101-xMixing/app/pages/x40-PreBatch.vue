@@ -254,9 +254,31 @@ watch(showLabelDialog, async (newVal, oldVal) => {
 })
 
 // ─── Post-Destructuring Logic & Reactive Logic ───
-const baseContainerSizeOptions = [0.1, 0.2, 0.3, 0.5, 1, 2, 5, 10, 20, 25]
+const currentContainerType = computed(() => {
+  return selectableIngredients.value.find((i: any) => i.re_code === selectedReCode.value)?.package_container_type || 'Bag'
+})
+
+const fetchedContainerSizes = ref<any[]>([])
+
+const fetchContainerSizes = async () => {
+  try {
+    const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/package-container-sizes/`, { headers: authHeader() })
+    fetchedContainerSizes.value = data
+  } catch (err) {
+    console.error('Failed to fetch container sizes', err)
+  }
+}
+
 const containerSizeOptions = computed(() => {
-  const options = [...baseContainerSizeOptions]
+  const type = currentContainerType.value
+  const matching = fetchedContainerSizes.value.filter(s => s.container_type === type).map(s => s.size)
+  const options = [...new Set(matching)]
+  
+  if (options.length === 0) {
+    // fallback
+    options.push(...(type === 'Bag' ? [0.1, 0.2, 0.3, 0.5, 1, 2, 5, 10, 20, 25] : [5, 10, 20, 25, 50]))
+  }
+
   // selectableIngredients is now defined
   const config = selectableIngredients.value.find((i: any) => i.re_code === selectedReCode.value)
   if (config && config.std_package_size > 0 && !options.includes(config.std_package_size)) {
@@ -264,6 +286,38 @@ const containerSizeOptions = computed(() => {
   }
   return options.sort((a, b) => a - b)
 })
+
+const showContainerSizeDialog = ref(false)
+const newContainerSize = ref<number | null>(null)
+
+const addContainerSize = async () => {
+    if (!newContainerSize.value || newContainerSize.value <= 0) return
+    try {
+        await $fetch(`${appConfig.apiBaseUrl}/package-container-sizes/`, {
+            method: 'POST',
+            headers: authHeader(),
+            body: { size: newContainerSize.value, container_type: currentContainerType.value }
+        })
+        newContainerSize.value = null
+        await fetchContainerSizes()
+    } catch(err) {
+        console.error('Add size error', err)
+        $q.notify({ type: 'negative', message: 'Failed to add container size' })
+    }
+}
+
+const deleteContainerSize = async (id: number) => {
+    try {
+        await $fetch(`${appConfig.apiBaseUrl}/package-container-sizes/${id}`, {
+            method: 'DELETE',
+            headers: authHeader()
+        })
+        await fetchContainerSizes()
+    } catch(err) {
+        console.error('Delete size error', err)
+        $q.notify({ type: 'negative', message: 'Failed to delete container size' })
+    }
+}
 const containerSize = ref(25)
 
 // Watch containerSize to update packageSize
@@ -541,6 +595,7 @@ const printPreBatchReport = async () => {
 
 // ─── Lifecycle ───
 onMounted(() => {
+  fetchContainerSizes()
   fetchIngredients()
   fetchProductionPlans()
   fetchBatchIds()
@@ -1484,7 +1539,12 @@ const reopenScanDialogAfterPrint = () => {
 
                     <!-- Container Size -->
                     <div class="col-12 col-md-3">
-                        <div class="text-subtitle2 q-mb-xs text-no-wrap">Container Size (kg)</div>
+                        <div class="text-subtitle2 q-mb-xs text-no-wrap row items-center">
+                            Container Size (kg)
+                            <q-btn flat dense round icon="settings" size="xs" color="grey-6" class="q-ml-sm" @click="showContainerSizeDialog = true">
+                                <q-tooltip>Manage Sizes</q-tooltip>
+                            </q-btn>
+                        </div>
                         <q-select
                             outlined
                             v-model="containerSize"
@@ -2320,6 +2380,39 @@ const reopenScanDialogAfterPrint = () => {
         </q-card-actions>
       </q-card>
     </q-dialog>
+
+    <!-- Container Size Mgmt Dialog -->
+    <q-dialog v-model="showContainerSizeDialog">
+      <q-card style="min-width: 350px;">
+        <q-card-section class="bg-blue-grey-1 text-weight-bold">
+          <div class="text-h6">Manage Sizes for {{ currentContainerType }}</div>
+        </q-card-section>
+        
+        <q-card-section class="q-pt-md">
+            <div class="row q-gutter-x-sm q-mb-md">
+                <q-input v-model.number="newContainerSize" type="number" step="0.01" outlined dense label="New Size (kg)" style="flex: 1;" @keyup.enter="addContainerSize" />
+                <q-btn color="primary" icon="add" label="Add" @click="addContainerSize" :disable="!newContainerSize" />
+            </div>
+            
+            <q-list bordered separator>
+                <q-item v-for="s in fetchedContainerSizes.filter(s => s.container_type === currentContainerType).sort((a,b) => a.size - b.size)" :key="s.id">
+                    <q-item-section>{{ s.size.toFixed(2) }} kg</q-item-section>
+                    <q-item-section side>
+                        <q-btn flat round dense color="negative" icon="delete" @click="deleteContainerSize(s.id)" />
+                    </q-item-section>
+                </q-item>
+                <q-item v-if="fetchedContainerSizes.filter(s => s.container_type === currentContainerType).length === 0">
+                    <q-item-section class="text-grey text-italic" style="font-size: 0.8rem;">No custom sizes configured.</q-item-section>
+                </q-item>
+            </q-list>
+        </q-card-section>
+        
+        <q-card-actions align="right">
+          <q-btn flat label="Close" color="primary" v-close-popup />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
+
   </q-page>
 </template>
 

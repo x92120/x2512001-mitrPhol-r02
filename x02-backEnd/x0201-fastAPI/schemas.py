@@ -81,6 +81,7 @@ class PackageContainerType(PackageContainerTypeBase):
 # Package Container Size Schemas
 class PackageContainerSizeBase(BaseModel):
     size: float = Field(..., gt=0)
+    container_type: Optional[str] = Field("Bag", max_length=50)
 
 class PackageContainerSizeCreate(PackageContainerSizeBase):
     pass
