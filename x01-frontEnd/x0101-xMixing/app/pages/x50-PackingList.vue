@@ -570,8 +570,88 @@ const fetchReadyToDeliver = async () => {
   }
 }
 
+// ── Delivery Expand/Collapse All ──
+const deliveryExpandMap = ref<Record<string, boolean>>({})
+const deliveryWhFilter = ref<'ALL' | 'FH' | 'SPP'>('ALL')
+const expandAllBoxes = () => {
+  groupedTransferredBoxes.value.forEach((r: any) => { deliveryExpandMap.value[r.batch_id] = true; fetchBoxContents(r.batch_id) })
+}
+const collapseAllBoxes = () => {
+  Object.keys(deliveryExpandMap.value).forEach(k => { deliveryExpandMap.value[k] = false })
+}
 
+// ── Box Contents Cache for Expandable Delivery View ──
+interface BoxPkg { id: number; batch_record_id: string; package_no: number; total_packages: number; net_volume: number; packing_status: number; recheck_status: number }
+interface BoxReCode { re_code: string; ingredient_name: string; required_volume: number; total_packed: number; status: number; packing_status: number; packages: BoxPkg[]; total_weight: number }
+interface BoxWhGroup { wh: string; re_codes: BoxReCode[]; total_weight: number }
+interface BoxContents { batch_id: string; wh_groups: BoxWhGroup[]; total_box_weight: number; _loading?: boolean }
+const boxContentsCache = ref<Map<string, BoxContents>>(new Map())
 
+const fetchBoxContents = async (batchId: string) => {
+  if (boxContentsCache.value.has(batchId)) return
+  // Set loading placeholder
+  boxContentsCache.value.set(batchId, { batch_id: batchId, wh_groups: [], total_box_weight: 0, _loading: true })
+  try {
+    const data = await $fetch<BoxContents>(`${appConfig.apiBaseUrl}/production-batches/box-contents/${batchId}`, {
+      headers: getAuthHeader() as Record<string, string>
+    })
+    boxContentsCache.value.set(batchId, { ...data, _loading: false })
+  } catch (e) {
+    console.error('Error fetching box contents for', batchId, e)
+    boxContentsCache.value.set(batchId, { batch_id: batchId, wh_groups: [], total_box_weight: 0, _loading: false })
+  }
+}
+
+// ── Cancel Packing Box ──
+const showCancelBoxDialog = ref(false)
+const cancelBoxBatchId = ref('')
+const cancelBoxWh = ref('')
+const cancelBoxReason = ref('')
+const cancelBoxLoading = ref(false)
+
+const openCancelBoxDialog = (batchId: string, wh: string) => {
+  cancelBoxBatchId.value = batchId
+  cancelBoxWh.value = wh
+  cancelBoxReason.value = ''
+  showCancelBoxDialog.value = true
+}
+
+const cancelBox = async () => {
+  if (!cancelBoxReason.value.trim()) {
+    $q.notify({ type: 'warning', message: 'Please enter a reason for cancellation.', position: 'top' })
+    return
+  }
+  cancelBoxLoading.value = true
+  try {
+    await $fetch(`${appConfig.apiBaseUrl}/production-batches/by-batch-id/${cancelBoxBatchId.value}/box-cancel`, {
+      method: 'PATCH',
+      headers: getAuthHeader() as Record<string, string>,
+      body: {
+        wh: cancelBoxWh.value,
+        reason: cancelBoxReason.value.trim(),
+        cancelled_by: 'operator',
+      },
+    })
+    $q.notify({
+      type: 'positive',
+      icon: 'cancel',
+      message: `${cancelBoxWh.value} Box Cancelled — ${cancelBoxBatchId.value}`,
+      caption: cancelBoxReason.value.trim(),
+      position: 'top',
+      timeout: 4000,
+    })
+    showCancelBoxDialog.value = false
+    // Clear cache so it reloads
+    boxContentsCache.value.delete(cancelBoxBatchId.value)
+    // Refresh delivery list
+    await fetchReadyToDeliver()
+  } catch (e: any) {
+    const msg = e?.data?.detail || e?.message || 'Failed to cancel box'
+    $q.notify({ type: 'negative', message: msg, position: 'top' })
+  } finally {
+    cancelBoxLoading.value = false
+  }
+}
 const fetchAllRecords = async () => {
   loadingRecords.value = true
   try {
@@ -730,6 +810,32 @@ const markDelivered = async (batch_id: string, wh: 'FH' | 'SPP') => {
   }
 }
 
+const cancelDelivery = async (batch_id: string, wh: 'FH' | 'SPP') => {
+  $q.dialog({
+    title: `Undo ${wh} Delivery`,
+    message: `Are you sure you want to undo the delivery of ${batch_id} (${wh})?`,
+    cancel: true,
+    persistent: true,
+    ok: { label: 'Undo Delivery', color: 'orange', icon: 'undo' },
+  }).onOk(async () => {
+    try {
+      await $fetch(`${appConfig.apiBaseUrl}/production-batches/by-batch-id/${batch_id}/cancel-deliver`, {
+        method: 'PATCH',
+        headers: getAuthHeader() as Record<string, string>,
+        body: { wh, delivered_by: 'operator' },
+      })
+      const newMap = new Map(deliveredMap.value)
+      newMap.delete(`${batch_id}-${wh}`)
+      deliveredMap.value = newMap
+      playSound('correct')
+      $q.notify({ type: 'positive', icon: 'undo', message: `${wh} delivery of ${batch_id} has been undone`, position: 'top', timeout: 2500 })
+    } catch (e: any) {
+      console.error('Error cancelling delivery:', e)
+      $q.notify({ type: 'negative', message: `Failed to undo ${wh} delivery: ${e?.data?.detail || e.message}` })
+    }
+  })
+}
+
 const filteredBoxScans = computed(() => {
   if (filterMiddleWh.value === 'ALL') return currentBoxScans.value
   if (filterMiddleWh.value === 'FH') return currentBoxScans.value.filter(bag => isFH(bag.wh || ''))
@@ -762,6 +868,40 @@ const groupedTransferredBoxes = computed((): TransferredBatchRow[] => {
     if (box.inProduction) row.inProduction = true
   }
   return Array.from(map.values())
+})
+
+// Group delivery rows by SKU → Plan → Batches
+interface DeliveryPlanGroup {
+  plan_id: string
+  batches: TransferredBatchRow[]
+}
+interface DeliverySkuGroup {
+  sku_id: string
+  sku_name: string
+  plans: DeliveryPlanGroup[]
+}
+const deliveryBySku = computed((): DeliverySkuGroup[] => {
+  const skuMap = new Map<string, { sku_name: string; planMap: Map<string, TransferredBatchRow[]> }>()
+  for (const row of groupedTransferredBoxes.value) {
+    const plan = plans.value.find((p: any) => p.batches?.some((b: any) => b.batch_id === row.batch_id))
+    const planId = plan?.plan_id || row.batch_id.replace(/-\d+$/, '') || 'Unknown'
+    const skuId = plan?.sku_id || 'Unknown'
+    const skuName = plan?.sku_name || ''
+
+    if (!skuMap.has(skuId)) skuMap.set(skuId, { sku_name: skuName, planMap: new Map() })
+    const entry = skuMap.get(skuId)!
+    if (!entry.planMap.has(planId)) entry.planMap.set(planId, [])
+    entry.planMap.get(planId)!.push(row)
+  }
+  const result: DeliverySkuGroup[] = []
+  for (const [skuId, entry] of skuMap) {
+    const plans: DeliveryPlanGroup[] = []
+    for (const [planId, batches] of entry.planMap) {
+      plans.push({ plan_id: planId, batches })
+    }
+    result.push({ sku_id: skuId, sku_name: entry.sku_name, plans })
+  }
+  return result
 })
 
 
@@ -874,6 +1014,139 @@ const { printPackingBoxReport, printTransferReport, printBoxLabel, printBagLabel
   currentBoxScans,
   filteredBoxScans,
 })
+
+// ── Inline Print: Packing Box Label (no new tab) ──────────────────
+const printBoxLabelInline = async (batchId: string, wh: string) => {
+  // Ensure box contents are loaded
+  if (!boxContentsCache.value.has(batchId)) {
+    await fetchBoxContents(batchId)
+  }
+  const contents = boxContentsCache.value.get(batchId)
+  if (!contents || contents._loading) {
+    $q.notify({ type: 'warning', message: 'Box contents still loading, try again.', position: 'top' })
+    return
+  }
+
+  const plan = plans.value.find((p: any) => p.batches?.some((b: any) => b.batch_id === batchId))
+
+  // Build ingredient rows from box contents
+  const ROW_H = 14, START_Y = 0, MAX_Y = 118
+  let pages: string[] = []
+  let curY = START_Y
+  let currentRowsSvg = ''
+
+  const pushPageAndReset = () => {
+    pages.push(currentRowsSvg)
+    currentRowsSvg = ''
+    curY = START_Y
+  }
+
+  // Filter to only the selected WH
+  const whGroups = contents.wh_groups.filter(g => g.wh === wh)
+  let rowIdx = 0
+  for (const whGrp of whGroups) {
+    for (const reGrp of whGrp.re_codes) {
+      if (curY + ROW_H > MAX_Y) pushPageAndReset()
+
+      const bg = rowIdx % 2 === 0 ? '#f0f0f0' : '#ffffff'
+      const statusIcon = reGrp.status === 2 ? '✓' : reGrp.status === 1 ? '◐' : '○'
+      currentRowsSvg += `
+        <rect x="10" y="${curY}" width="364" height="${ROW_H}" fill="${bg}"/>
+        <text x="14" y="${curY + 10}" style="font-size:9px;font-family:Arial,sans-serif;font-weight:bold;fill:#000000">${statusIcon} ${reGrp.re_code}</text>
+        <text x="120" y="${curY + 10}" style="font-size:8px;font-family:Arial,sans-serif;fill:#555555">${(reGrp.ingredient_name || '').substring(0, 30)}</text>
+        <text x="370" y="${curY + 10}" text-anchor="end" style="font-size:9px;font-family:Arial,sans-serif;font-weight:bold;fill:#000000">${reGrp.total_weight.toFixed(4)}</text>
+        <line x1="10" y1="${curY + ROW_H}" x2="374" y2="${curY + ROW_H}" stroke="#e0e0e0" stroke-width="0.5"/>`
+      curY += ROW_H
+      rowIdx++
+    }
+  }
+  if (currentRowsSvg !== '') pages.push(currentRowsSvg)
+  if (pages.length === 0) {
+    pages.push(`<text x="192" y="40" text-anchor="middle" style="font-size:12px;font-family:Arial,sans-serif;fill:#999999">No items in box</text>`)
+  }
+
+  const totalWt = whGroups.reduce((sum, g) => sum + g.total_weight, 0)
+  const now = new Date()
+  const printDate = now.toLocaleDateString('en-GB') + ' ' + now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+
+  try {
+    const resp = await fetch('/labels/packingbox-label_4x3.svg')
+    const templateSvg = await resp.text()
+
+    let finalSvgContent = ''
+    const totalPages = pages.length
+
+    for (let i = 0; i < totalPages; i++) {
+      const boxNum = i + 1
+      const boxIdVal = totalPages > 1 ? `${batchId}-${wh}-${boxNum}/${totalPages}` : `${batchId}-${wh}`
+
+      let pageSvg = templateSvg
+        .replaceAll('{{Warehouse}}', wh)
+        .replaceAll('{{PrintDate}}', printDate)
+        .replace('{{BoxId}}', boxIdVal)
+        .replace('{{Plant}}', plan?.plant || 'Line-1')
+        .replace('{{TotalNetWeight}}', totalWt.toFixed(4))
+        .replace('{{PreBatchRows}}', pages[i] || '')
+
+      const QRCode = (await import('qrcode')).default
+      const qrDataUrl = await QRCode.toDataURL(boxIdVal, { width: 72, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
+      pageSvg = pageSvg.replace('{{BoxQRCode}}', `<image x="0" y="0" width="72" height="72" href="${qrDataUrl}" />`)
+
+      finalSvgContent += pageSvg
+    }
+
+    // Print via hidden iframe (no new tab)
+    const iframe = document.createElement('iframe')
+    iframe.style.position = 'fixed'
+    iframe.style.top = '-10000px'
+    iframe.style.left = '-10000px'
+    iframe.style.width = '0'
+    iframe.style.height = '0'
+    iframe.style.border = 'none'
+    document.body.appendChild(iframe)
+
+    const iframeDoc = iframe.contentDocument || iframe.contentWindow?.document
+    if (!iframeDoc) {
+      $q.notify({ type: 'negative', message: 'Cannot create print frame', position: 'top' })
+      document.body.removeChild(iframe)
+      return
+    }
+    iframeDoc.open()
+    iframeDoc.write(`<!DOCTYPE html><html><head>
+      <title>Box Label — ${batchId} [${wh}]</title>
+      <style>
+        @page { size: 4in 3in; margin: 0; }
+        body { margin: 0; padding: 0; }
+        svg { display: block; width: 4in; height: 3in; page-break-after: always; }
+        svg:last-of-type { page-break-after: auto; }
+      </style>
+    </head><body>${finalSvgContent}</body></html>`)
+    iframeDoc.close()
+
+    // Wait for content to render, then print
+    iframe.onload = () => {
+      setTimeout(() => {
+        iframe.contentWindow?.print()
+        // Clean up after print dialog closes
+        setTimeout(() => {
+          document.body.removeChild(iframe)
+        }, 1000)
+      }, 300)
+    }
+    // Trigger load for about:blank iframes
+    if (iframe.contentDocument?.readyState === 'complete') {
+      setTimeout(() => {
+        iframe.contentWindow?.print()
+        setTimeout(() => {
+          document.body.removeChild(iframe)
+        }, 1000)
+      }, 300)
+    }
+  } catch (e) {
+    console.error('Print error:', e)
+    $q.notify({ type: 'negative', message: 'Failed to load label template', position: 'top' })
+  }
+}
 
 
 
@@ -1918,10 +2191,25 @@ onMounted(async () => {
                 <q-icon name="local_shipping" size="sm" />
                 <div class="text-subtitle2 text-weight-bold">
                   Ready to Delivery
-                  <span class="text-caption" style="opacity:0.8">— {{ filterMiddleWh === 'FH' ? 'FH → SPP' : 'SPP → Prod' }}</span>
                 </div>
               </div>
               <div class="row items-center q-gutter-xs">
+                <q-btn flat round dense icon="unfold_more" size="xs" color="white" @click="expandAllBoxes()">
+                  <q-tooltip>Expand All</q-tooltip>
+                </q-btn>
+                <q-btn flat round dense icon="unfold_less" size="xs" color="white" @click="collapseAllBoxes()">
+                  <q-tooltip>Collapse All</q-tooltip>
+                </q-btn>
+                <q-select
+                  v-model="deliveryWhFilter"
+                  :options="[{ label: 'ALL', value: 'ALL' }, { label: 'FH', value: 'FH' }, { label: 'SPP', value: 'SPP' }]"
+                  emit-value map-options dense outlined
+                  style="min-width:60px;background:rgba(255,255,255,0.15);border-radius:4px;"
+                  input-class="text-white text-caption"
+                  popup-content-class="text-caption"
+                  color="white"
+                  dark
+                />
                 <q-select
                   v-model="filterDeliveryStatus"
                   :options="[{ label: 'Show All', value: 'SHOW_ALL' }, { label: 'All', value: 'ALL' }, { label: 'Waiting', value: 'WAITING' }]"
@@ -1936,9 +2224,11 @@ onMounted(async () => {
                   {{ groupedTransferredBoxes.filter(r => {
                     if (filterDeliveryStatus === 'SHOW_ALL') return true
                     if (r.inProduction) return false
-                    const hasWh = filterMiddleWh === 'FH' ? !!r.fh : !!r.spp
-                    const isDelivered = filterMiddleWh === 'FH' ? !!deliveredMap.get(`${r.batch_id}-FH`) : !!deliveredMap.get(`${r.batch_id}-SPP`)
-                    return hasWh && (filterDeliveryStatus === 'ALL' || !isDelivered)
+                    const whF = deliveryWhFilter
+                    const hasWh = whF === 'ALL' ? (!!r.fh || !!r.spp) : (whF === 'FH' ? !!r.fh : !!r.spp)
+                    if (!hasWh) return false
+                    const isDelivered = (whF === 'FH' || whF === 'ALL') ? !!deliveredMap.get(`${r.batch_id}-FH`) : !!deliveredMap.get(`${r.batch_id}-SPP`)
+                    return filterDeliveryStatus === 'ALL' || !isDelivered
                   }).length }}
                 </q-badge>
                 <q-btn
@@ -2052,68 +2342,235 @@ onMounted(async () => {
                 </table>
               </template>
 
-              <!-- ═══ Normal View: Delivery List ═══ -->
+              <!-- ═══ Normal View: Expandable Delivery List ═══ -->
               <q-list v-else dense separator>
-                <template v-for="row in groupedTransferredBoxes" :key="row.batch_id">
-                  <q-item
-                    v-if="(() => {
-                      if (row.inProduction) return false
-                      const hasWh = filterMiddleWh === 'FH' ? !!row.fh : !!row.spp
-                      const isDelivered = filterMiddleWh === 'FH' ? !!deliveredMap.get(`${row.batch_id}-FH`) : !!deliveredMap.get(`${row.batch_id}-SPP`)
-                      return hasWh && (filterDeliveryStatus === 'ALL' || !isDelivered)
-                    })()"
-                    class="q-pa-xs"
+                <!-- ── Level 0: SKU ── -->
+                <template v-for="skuGrp in deliveryBySku" :key="skuGrp.sku_name">
+                  <q-expansion-item
+                    dense expand-separator switch-toggle-side default-opened
+                    header-class="bg-deep-purple-1"
                   >
-                    <q-item-section>
-                      <q-item-label class="text-weight-bold text-caption text-mono">
-                        📦 {{ row.batch_id }}-{{ filterMiddleWh === 'FH' ? 'FH' : 'SPP' }}
-                      </q-item-label>
-                    </q-item-section>
+                    <template v-slot:header>
+                      <q-item-section avatar style="min-width:22px">
+                        <q-icon name="category" color="deep-purple-6" size="xs" />
+                      </q-item-section>
+                      <q-item-section>
+                        <q-item-label class="text-weight-bold text-deep-purple-9" style="font-size:0.78rem;">
+                          {{ skuGrp.sku_id }}
+                        </q-item-label>
+                        <q-item-label v-if="skuGrp.sku_name" caption style="font-size:0.58rem">{{ skuGrp.sku_name }}</q-item-label>
+                      </q-item-section>
+                      <q-item-section side style="padding-left:0;min-width:28px">
+                        <q-btn flat round dense icon="close" size="xs" color="red-4"
+                          @click.stop="openCancelBoxDialog(skuGrp.plans[0]?.batches[0]?.batch_id || '', deliveryWhFilter === 'ALL' ? 'FH' : deliveryWhFilter)">
+                          <q-tooltip>Cancel Box</q-tooltip>
+                        </q-btn>
+                      </q-item-section>
+                    </template>
 
-                    <q-item-section side style="padding-right:0;min-width:28px">
-                      <q-btn flat round dense icon="print" size="xs" color="indigo-4"
-                        @click.stop="printPackingBoxReport(row.batch_id, filterMiddleWh === 'ALL' ? 'FH' : filterMiddleWh)">
-                        <q-tooltip>Print Box Report (A4)</q-tooltip>
-                      </q-btn>
-                    </q-item-section>
+                    <!-- ── Level 1: Plan ID ── -->
+                    <q-list dense class="q-pl-xs">
+                      <template v-for="planGrp in skuGrp.plans" :key="planGrp.plan_id">
+                        <q-expansion-item
+                          dense expand-separator switch-toggle-side default-opened
+                          header-class="bg-indigo-1"
+                        >
+                          <template v-slot:header>
+                            <q-item-section avatar style="min-width:22px">
+                              <q-icon name="event_note" color="indigo-7" size="xs" />
+                            </q-item-section>
+                            <q-item-section>
+                              <q-item-label class="text-weight-bold" style="font-size:0.76rem;font-family:monospace;">
+                                {{ planGrp.plan_id }}
+                              </q-item-label>
+                            </q-item-section>
+                            <q-item-section side>
+                              <q-badge color="indigo-6" class="text-weight-bold" style="font-size:0.58rem">
+                                {{ planGrp.batches.length }} batch{{ planGrp.batches.length > 1 ? 'es' : '' }}
+                              </q-badge>
+                            </q-item-section>
+                            <q-item-section side style="padding-left:0;min-width:28px">
+                              <q-btn flat round dense icon="close" size="xs" color="red-4"
+                                @click.stop="openCancelBoxDialog(planGrp.batches[0]?.batch_id || '', deliveryWhFilter === 'ALL' ? 'FH' : deliveryWhFilter)">
+                                <q-tooltip>Cancel Box</q-tooltip>
+                              </q-btn>
+                            </q-item-section>
+                          </template>
 
-                    <!-- Per-WH delivery: only shows the section matching the Packing Box dropdown -->
-                    <q-item-section side>
-                      <div class="column q-gutter-xs items-end">
-                        <!-- FH boxed → deliver to SPP (only when FH dropdown selected) -->
-                        <template v-if="row.fh && filterMiddleWh === 'FH'">
-                          <div class="row items-center q-gutter-xs">
-                            <q-badge color="blue-7" style="font-size:0.58rem;">
-                              FH <q-icon name="unarchive" size="10px" class="q-ml-xs"/> {{ row.fh.time }}
-                            </q-badge>
-                            <q-badge v-if="deliveredMap.get(`${row.batch_id}-FH`)" color="green-8" class="text-weight-bold" style="font-size:0.58rem;">
-                              <q-icon name="local_shipping" size="10px" class="q-mr-xs"/>→SPP {{ deliveredMap.get(`${row.batch_id}-FH`) }}
-                            </q-badge>
-                            <q-btn v-else dense unelevated no-caps size="xs" color="blue-7" text-color="white" icon="local_shipping" label="→SPP" @click="markDelivered(row.batch_id, 'FH')">
-                              <q-tooltip>Deliver FH to SPP</q-tooltip>
-                            </q-btn>
-                          </div>
-                        </template>
-                        <!-- SPP boxed → deliver to Production Hall (only when SPP dropdown selected) -->
-                        <template v-if="row.spp && filterMiddleWh === 'SPP'">
-                          <div class="row items-center q-gutter-xs">
-                            <q-badge color="light-blue-7" style="font-size:0.58rem;">
-                              SPP <q-icon name="unarchive" size="10px" class="q-ml-xs"/> {{ row.spp.time }}
-                            </q-badge>
-                            <q-badge v-if="deliveredMap.get(`${row.batch_id}-SPP`)" color="green-8" class="text-weight-bold" style="font-size:0.58rem;">
-                              <q-icon name="local_shipping" size="10px" class="q-mr-xs"/>→Prod {{ deliveredMap.get(`${row.batch_id}-SPP`) }}
-                            </q-badge>
-                            <q-btn v-else dense unelevated no-caps size="xs" color="amber-7" text-color="white" icon="local_shipping" label="→Prod" @click="markDelivered(row.batch_id, 'SPP')">
-                              <q-tooltip>Deliver SPP to Production Hall</q-tooltip>
-                            </q-btn>
-                          </div>
-                        </template>
-                      </div>
-                    </q-item-section>
-                  </q-item>
+                          <!-- ── Level 2: Batch IDs ── -->
+                          <q-list dense class="q-pl-xs">
+                            <template v-for="row in planGrp.batches" :key="row.batch_id">
+                              <q-expansion-item
+                                v-if="(() => {
+                                  if (row.inProduction) return false
+                                  const wf = deliveryWhFilter
+                                  const hasWh = wf === 'ALL' ? (!!row.fh || !!row.spp) : (wf === 'FH' ? !!row.fh : !!row.spp)
+                                  if (!hasWh) return false
+                                  if (filterDeliveryStatus === 'ALL') return true
+                                  const fhDel = !!deliveredMap.get(`${row.batch_id}-FH`)
+                                  const sppDel = !!deliveredMap.get(`${row.batch_id}-SPP`)
+                                  const isDelivered = wf === 'ALL' ? (fhDel && sppDel) : (wf === 'FH' ? fhDel : sppDel)
+                                  return !isDelivered
+                                })()"
+                                v-model="deliveryExpandMap[row.batch_id]"
+                                dense expand-separator switch-toggle-side
+                                header-class="bg-grey-1"
+                                @show="fetchBoxContents(row.batch_id)"
+                              >
+                                <template v-slot:header>
+                                  <q-item-section avatar style="min-width:22px">
+                                    <q-icon name="inventory_2" color="indigo-6" size="xs" />
+                                  </q-item-section>
+                                  <q-item-section>
+                                    <q-item-label class="text-weight-bold" style="font-size:0.78rem;font-family:monospace;">
+                                      {{ row.batch_id }}
+                                    </q-item-label>
+                                  </q-item-section>
+
+                                  <q-item-section side style="padding-right:0;min-width:28px">
+                                    <q-btn flat round dense icon="print" size="xs" color="indigo-4"
+                                      @click.stop="printBoxLabelInline(row.batch_id, deliveryWhFilter === 'ALL' ? 'FH' : deliveryWhFilter)">
+                                      <q-tooltip>Print Box Label</q-tooltip>
+                                    </q-btn>
+                                  </q-item-section>
+
+                                  <q-item-section side>
+                                    <div class="row items-center q-gutter-xs">
+                                      <template v-if="row.fh && (deliveryWhFilter === 'ALL' || deliveryWhFilter === 'FH')">
+                                        <q-badge color="blue-7" style="font-size:0.58rem;">
+                                          FH <q-icon name="unarchive" size="10px" class="q-ml-xs"/> {{ row.fh.time }}
+                                        </q-badge>
+                                        <q-badge v-if="deliveredMap.get(`${row.batch_id}-FH`)" color="green-8" class="text-weight-bold" style="font-size:0.58rem;">
+                                          <q-icon name="local_shipping" size="10px" class="q-mr-xs"/> {{ deliveredMap.get(`${row.batch_id}-FH`) }}
+                                        </q-badge>
+                                      </template>
+                                      <template v-if="row.spp && (deliveryWhFilter === 'ALL' || deliveryWhFilter === 'SPP')">
+                                        <q-badge color="light-blue-7" style="font-size:0.58rem;">
+                                          SPP <q-icon name="unarchive" size="10px" class="q-ml-xs"/> {{ row.spp.time }}
+                                        </q-badge>
+                                        <q-badge v-if="deliveredMap.get(`${row.batch_id}-SPP`)" color="green-8" class="text-weight-bold" style="font-size:0.58rem;">
+                                          <q-icon name="local_shipping" size="10px" class="q-mr-xs"/> {{ deliveredMap.get(`${row.batch_id}-SPP`) }}
+                                        </q-badge>
+                                      </template>
+                                    </div>
+                                  </q-item-section>
+
+                                  <!-- Cancel Box icon (far right, always visible) -->
+                                  <q-item-section side style="padding-left:0;min-width:28px">
+                                    <q-btn flat round dense icon="close" size="xs" color="red-4"
+                                      @click.stop="openCancelBoxDialog(row.batch_id, deliveryWhFilter === 'ALL' ? 'FH' : deliveryWhFilter)">
+                                      <q-tooltip>Cancel Box</q-tooltip>
+                                    </q-btn>
+                                  </q-item-section>
+                                </template>
+
+                                <!-- ── Expanded: Box Details (ReCode → Package) ── -->
+                                <div v-if="boxContentsCache.get(row.batch_id)?._loading" class="text-center q-pa-sm">
+                                  <q-spinner color="indigo" size="sm" /> <span class="text-caption text-grey">Loading...</span>
+                                </div>
+                                <template v-else-if="boxContentsCache.get(row.batch_id)">
+                                  <q-list dense class="q-pl-xs">
+                                    <!-- ── Level 3: RE-Codes (flattened across WH groups) ── -->
+                                    <template v-for="whGrp in boxContentsCache.get(row.batch_id)!.wh_groups" :key="whGrp.wh">
+                                      <q-expansion-item
+                                        v-for="reGrp in whGrp.re_codes" :key="`${whGrp.wh}-${reGrp.re_code}`"
+                                        dense expand-separator switch-toggle-side
+                                        header-class="bg-grey-1"
+                                      >
+                                        <template v-slot:header>
+                                          <q-item-section avatar style="min-width:18px">
+                                            <q-icon
+                                              :name="reGrp.status === 2 ? 'check_circle' : (reGrp.status === 1 ? 'hourglass_top' : 'radio_button_unchecked')"
+                                              :color="reGrp.status === 2 ? 'green' : (reGrp.status === 1 ? 'orange' : 'grey-4')"
+                                              size="xs"
+                                            />
+                                          </q-item-section>
+                                          <q-item-section>
+                                            <q-item-label style="font-size:0.7rem" class="text-weight-bold">{{ reGrp.re_code }}</q-item-label>
+                                            <q-item-label caption style="font-size:0.58rem">{{ reGrp.ingredient_name }}</q-item-label>
+                                          </q-item-section>
+                                          <q-item-section side>
+                                            <div class="column items-end">
+                                              <span class="text-weight-bold" style="font-size:0.65rem">{{ reGrp.total_weight.toFixed(4) }} kg</span>
+                                              <span class="text-grey-6" style="font-size:0.55rem">req: {{ reGrp.required_volume?.toFixed(4) || '0.0000' }}</span>
+                                            </div>
+                                          </q-item-section>
+                                        </template>
+
+                                        <!-- ── Level 4: Packages (preBatchID Pkg X/Y net/total) ── -->
+                                        <q-list dense class="q-pl-md bg-grey-1">
+                                          <q-item v-for="pkg in reGrp.packages" :key="pkg.id" dense style="min-height:24px;">
+                                            <q-item-section avatar style="min-width:16px">
+                                              <q-icon
+                                                :name="pkg.packing_status === 1 ? 'check_box' : 'check_box_outline_blank'"
+                                                :color="pkg.packing_status === 1 ? 'green' : 'grey-4'"
+                                                size="xs"
+                                              />
+                                            </q-item-section>
+                                            <q-item-section>
+                                              <q-item-label style="font-size:0.62rem;font-family:monospace;">
+                                                <span v-if="pkg.batch_record_id" class="text-indigo-7">{{ pkg.batch_record_id }}</span>
+                                                Pkg {{ pkg.package_no }}/{{ pkg.total_packages }}
+                                              </q-item-label>
+                                            </q-item-section>
+                                            <q-item-section side>
+                                              <span style="font-size:0.62rem;font-weight:bold;">
+                                                {{ pkg.net_volume.toFixed(4) }} / {{ reGrp.total_weight.toFixed(4) }} kg
+                                              </span>
+                                            </q-item-section>
+                                          </q-item>
+                                          <q-item v-if="reGrp.packages.length === 0" dense style="min-height:22px">
+                                            <q-item-section class="text-grey-5 text-italic" style="font-size:0.6rem">No packages weighed yet</q-item-section>
+                                          </q-item>
+                                        </q-list>
+                                      </q-expansion-item>
+                                    </template>
+
+                                    <!-- Total Box Weight -->
+                                    <q-item dense class="bg-indigo-1" style="min-height:28px;">
+                                      <q-item-section>
+                                        <q-item-label class="text-weight-bold text-indigo-9" style="font-size:0.72rem">
+                                          📦 Total Box Weight
+                                        </q-item-label>
+                                      </q-item-section>
+                                      <q-item-section side>
+                                        <span class="text-weight-bold text-indigo-9" style="font-size:0.72rem">
+                                          {{ boxContentsCache.get(row.batch_id)!.total_box_weight.toFixed(4) }} kg
+                                        </span>
+                                      </q-item-section>
+                                    </q-item>
+
+                                    <!-- Actions: Deliver / Cancel Box -->
+                                    <q-item dense class="bg-grey-2" style="min-height:32px;">
+                                      <q-item-section>
+                                        <div class="row items-center q-gutter-xs">
+                                          <template v-if="row.fh && !deliveredMap.get(`${row.batch_id}-FH`) && (deliveryWhFilter === 'ALL' || deliveryWhFilter === 'FH')">
+                                            <q-btn dense unelevated no-caps size="xs" color="blue-7" text-color="white" icon="local_shipping" label="Deliver FH"
+                                              @click="markDelivered(row.batch_id, 'FH')" />
+                                            <q-btn dense flat no-caps size="xs" color="red-5" icon="close" label="Cancel FH"
+                                              @click="openCancelBoxDialog(row.batch_id, 'FH')" />
+                                          </template>
+                                          <template v-if="row.spp && !deliveredMap.get(`${row.batch_id}-SPP`) && (deliveryWhFilter === 'ALL' || deliveryWhFilter === 'SPP')">
+                                            <q-btn dense unelevated no-caps size="xs" color="amber-7" text-color="white" icon="local_shipping" label="Deliver SPP"
+                                              @click="markDelivered(row.batch_id, 'SPP')" />
+                                            <q-btn dense flat no-caps size="xs" color="red-5" icon="close" label="Cancel SPP"
+                                              @click="openCancelBoxDialog(row.batch_id, 'SPP')" />
+                                          </template>
+                                        </div>
+                                      </q-item-section>
+                                    </q-item>
+                                  </q-list>
+                                </template>
+                              </q-expansion-item>
+                            </template>
+                          </q-list>
+                        </q-expansion-item>
+                      </template>
+                    </q-list>
+                  </q-expansion-item>
                 </template>
 
-                <q-item v-if="groupedTransferredBoxes.length === 0">
+                <q-item v-if="deliveryBySku.length === 0">
                   <q-item-section class="text-center text-grey q-pa-lg text-caption">
                     <q-icon name="inbox" size="sm" class="q-mb-sm" /><br>
                     No boxes ready for delivery yet
@@ -2126,6 +2583,54 @@ onMounted(async () => {
       </div>
     </div>
 
+
+    <!-- ═══ CANCEL BOX DIALOG ═══ -->
+    <q-dialog v-model="showCancelBoxDialog" persistent>
+      <q-card style="width:400px;max-width:96vw;">
+        <q-card-section class="bg-red-7 text-white q-py-sm">
+          <div class="row items-center q-gutter-sm">
+            <q-icon name="undo" size="sm" />
+            <div class="text-subtitle1 text-weight-bold">
+              Cancel Packing Box
+            </div>
+            <q-space />
+            <q-btn flat round dense icon="close" v-close-popup />
+          </div>
+        </q-card-section>
+
+        <q-card-section class="q-pa-md">
+          <div class="text-subtitle2 q-mb-sm">
+            <q-icon name="inventory_2" class="q-mr-xs" />
+            <span class="text-weight-bold" style="font-family:monospace;">{{ cancelBoxBatchId }}</span>
+            <q-badge :color="cancelBoxWh === 'FH' ? 'blue-6' : 'light-blue-6'" class="q-ml-sm">{{ cancelBoxWh }}</q-badge>
+          </div>
+
+          <q-input
+            v-model="cancelBoxReason"
+            type="textarea"
+            outlined dense
+            label="Reason for cancellation *"
+            placeholder="e.g. Wrong items packed, weight mismatch, etc."
+            :rows="3"
+            autofocus
+            :rules="[(v: string) => !!v?.trim() || 'Reason is required']"
+          />
+        </q-card-section>
+
+        <q-card-actions align="right" class="q-px-md q-pb-md">
+          <q-btn flat no-caps label="Keep Box" color="grey" v-close-popup />
+          <q-btn
+            unelevated no-caps
+            label="Cancel Box"
+            color="red-7"
+            icon="undo"
+            :loading="cancelBoxLoading"
+            :disable="!cancelBoxReason.trim()"
+            @click="cancelBox"
+          />
+        </q-card-actions>
+      </q-card>
+    </q-dialog>
 
     <!-- ═══ TRANSFER REPORT DIALOG ═══ -->
     <q-dialog v-model="showTransferDialog" persistent>

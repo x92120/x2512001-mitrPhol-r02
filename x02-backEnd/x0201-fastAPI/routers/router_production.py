@@ -173,7 +173,7 @@ def get_production_plans(skip: int = 0, limit: int = 1000, status: Optional[str]
             FROM prebatch_reqs r
             LEFT JOIN ingredients i ON i.re_code = r.re_code
             WHERE r.plan_id IN :plan_ids
-            GROUP BY r.plan_id, r.re_code, r.ingredient_name, i.warehouse, r.required_volume
+            GROUP BY r.plan_id, r.re_code, r.ingredient_name, i.warehouse, i.mat_sap_code, r.required_volume
             ORDER BY i.warehouse, r.re_code
         """).bindparams(bindparam("plan_ids", expanding=True)),
         {"plan_ids": plan_id_strs}).fetchall()
@@ -278,6 +278,76 @@ def get_production_batches(skip: int = 0, limit: int = 1000, db: Session = Depen
     return crud.get_production_batches(db, skip=skip, limit=limit)
 
 # NOTE: This must come BEFORE /production-batches/{batch_id} to avoid route conflict
+@router.get("/production-batches/box-contents/{batch_id_str}")
+def get_box_contents(batch_id_str: str, db: Session = Depends(get_db)):
+    """Get box contents for a batch, grouped by WH → re_code → packages.
+    Uses prebatch_items directly — each item row IS a package.
+    """
+    from sqlalchemy import text as sql_text3
+
+    # Get all items from prebatch_items (the packing list — each row = one package)
+    items = db.execute(sql_text3("""
+        SELECT i.id, i.re_code, i.ingredient_name, i.wh,
+               i.required_volume, i.net_volume,
+               i.status, i.packing_status, i.batch_record_id,
+               i.package_no, i.total_packages
+        FROM prebatch_items i
+        WHERE i.batch_id = :bid
+        ORDER BY i.wh, i.re_code, i.package_no
+    """), {"bid": batch_id_str}).fetchall()
+
+    # Build hierarchical structure: WH → re_code → packages (items)
+    wh_map: dict = {}
+    total_box_weight = 0.0
+    for item in items:
+        wh = item.wh or "Mix"
+        if wh not in wh_map:
+            wh_map[wh] = {"wh": wh, "re_codes": {}, "total_weight": 0.0}
+        wh_node = wh_map[wh]
+
+        re = item.re_code or "?"
+        if re not in wh_node["re_codes"]:
+            wh_node["re_codes"][re] = {
+                "re_code": re,
+                "ingredient_name": item.ingredient_name or re,
+                "required_volume": float(item.required_volume or 0),
+                "status": item.status or 0,
+                "packing_status": item.packing_status or 0,
+                "packages": [],
+                "total_weight": 0.0,
+            }
+        re_node = wh_node["re_codes"][re]
+
+        nv = float(item.net_volume or 0)
+        re_node["packages"].append({
+            "id": item.id,
+            "batch_record_id": item.batch_record_id or "",
+            "package_no": item.package_no or 1,
+            "total_packages": item.total_packages or 1,
+            "net_volume": nv,
+            "required_volume": float(item.required_volume or 0),
+            "packing_status": item.packing_status or 0,
+            "recheck_status": 0,
+        })
+        re_node["total_weight"] += nv
+        # Also accumulate required_volume (sum across duplicate re_codes)
+        re_node["required_volume"] = float(item.required_volume or 0)
+        wh_node["total_weight"] += nv
+        total_box_weight += nv
+
+    # Convert dicts to lists
+    wh_groups = []
+    for wh_node in wh_map.values():
+        wh_node["re_codes"] = sorted(wh_node["re_codes"].values(), key=lambda x: x["re_code"])
+        wh_groups.append(wh_node)
+
+    return {
+        "batch_id": batch_id_str,
+        "wh_groups": wh_groups,
+        "total_box_weight": round(total_box_weight, 4),
+    }
+
+
 @router.get("/production-batches/ready-to-deliver")
 def get_ready_to_deliver(show_all: bool = False, db: Session = Depends(get_db)):
     """Get batches that have at least one boxed warehouse but are not yet delivered.
@@ -883,6 +953,66 @@ def close_box(batch_id_str: str, data: schemas.BoxCloseRequest, db: Session = De
     }
 
 
+@router.patch("/production-batches/by-batch-id/{batch_id_str}/box-cancel")
+def cancel_box(batch_id_str: str, data: schemas.BoxCancelRequest, db: Session = Depends(get_db)):
+    """Cancel (revert) a closed packing box. Clears boxed_at and resets packing_status on items."""
+    batch = db.query(models.ProductionBatch).filter(
+        models.ProductionBatch.batch_id == batch_id_str
+    ).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    wh = data.wh.upper()
+    if wh == "FH":
+        if not batch.fh_boxed_at:
+            raise HTTPException(status_code=400, detail="FH box is not closed, nothing to cancel.")
+        if batch.fh_delivered_at:
+            raise HTTPException(status_code=400, detail="FH box already delivered. Cannot cancel after delivery.")
+        batch.fh_boxed_at = None
+    elif wh == "SPP":
+        if not batch.spp_boxed_at:
+            raise HTTPException(status_code=400, detail="SPP box is not closed, nothing to cancel.")
+        if batch.spp_delivered_at:
+            raise HTTPException(status_code=400, detail="SPP box already delivered. Cannot cancel after delivery.")
+        batch.spp_boxed_at = None
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid warehouse: {wh}. Must be FH or SPP.")
+
+    # Reset packing_status on prebatch_recs for this batch + WH
+    from sqlalchemy import text as sql_cancel
+    db.execute(sql_cancel("""
+        UPDATE prebatch_recs r
+        JOIN prebatch_reqs q ON q.id = r.req_id
+        SET r.packing_status = 0, r.packed_at = NULL, r.packed_by = NULL
+        WHERE q.batch_id = :bid AND q.wh = :wh AND r.packing_status = 1
+    """), {"bid": batch_id_str, "wh": wh})
+
+    # Reset packing_status on prebatch_items for this batch + WH
+    db.execute(sql_cancel("""
+        UPDATE prebatch_items
+        SET packing_status = 0, packed_at = NULL, packed_by = NULL
+        WHERE batch_id = :bid AND wh = :wh AND packing_status = 1
+    """), {"bid": batch_id_str, "wh": wh})
+
+    db.commit()
+    db.refresh(batch)
+
+    logger.info(
+        "Box cancelled: batch=%s wh=%s reason='%s' by=%s",
+        batch_id_str, wh, data.reason, data.cancelled_by or "operator"
+    )
+
+    return {
+        "status": "success",
+        "batch_id": batch.batch_id,
+        "wh": wh,
+        "reason": data.reason,
+        "cancelled_by": data.cancelled_by or "operator",
+        "fh_boxed_at": batch.fh_boxed_at.isoformat() if batch.fh_boxed_at else None,
+        "spp_boxed_at": batch.spp_boxed_at.isoformat() if batch.spp_boxed_at else None,
+    }
+
+
 @router.patch("/production-batches/by-batch-id/{batch_id_str}/deliver")
 def deliver_batch(batch_id_str: str, data: schemas.DeliveryRequest, db: Session = Depends(get_db)):
     """Mark a batch warehouse as delivered. FH→SPP or SPP→Production Hall."""
@@ -915,6 +1045,34 @@ def deliver_batch(batch_id_str: str, data: schemas.DeliveryRequest, db: Session 
     }
 
 
+@router.patch("/production-batches/by-batch-id/{batch_id_str}/cancel-deliver")
+def cancel_deliver_batch(batch_id_str: str, data: schemas.DeliveryRequest, db: Session = Depends(get_db)):
+    """Undo a delivery — clear fh_delivered_at / spp_delivered_at."""
+    batch = db.query(models.ProductionBatch).filter(
+        models.ProductionBatch.batch_id == batch_id_str
+    ).first()
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    wh = data.wh.upper()
+    if wh == "FH":
+        batch.fh_delivered_at = None
+        batch.fh_delivered_by = None
+    elif wh == "SPP":
+        batch.spp_delivered_at = None
+        batch.spp_delivered_by = None
+    else:
+        raise HTTPException(status_code=400, detail=f"Invalid warehouse: {wh}. Must be FH or SPP.")
+
+    db.commit()
+    db.refresh(batch)
+    logger.info("Delivery cancelled: batch=%s wh=%s by=%s", batch_id_str, wh, data.delivered_by or "operator")
+    return {
+        "status": "success",
+        "batch_id": batch.batch_id,
+        "wh": wh,
+        "message": f"{wh} delivery undone",
+    }
 
 
 

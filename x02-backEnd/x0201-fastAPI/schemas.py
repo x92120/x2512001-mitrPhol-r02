@@ -563,6 +563,12 @@ class DeliveryRequest(BaseModel):
     wh: str  # 'FH' (FH→SPP) or 'SPP' (SPP→Production Hall)
     delivered_by: Optional[str] = None
 
+class BoxCancelRequest(BaseModel):
+    """Request to cancel (revert) a closed packing box."""
+    wh: str  # 'FH' or 'SPP'
+    reason: str  # Reason for cancellation
+    cancelled_by: Optional[str] = None
+
 # Stock Adjustment Schemas
 class StockAdjustmentCreate(BaseModel):
     intake_lot_id: str = Field(..., min_length=1, max_length=50)
