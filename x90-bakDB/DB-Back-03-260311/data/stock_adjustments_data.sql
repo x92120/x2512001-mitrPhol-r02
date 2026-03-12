@@ -1,0 +1,8 @@
+-- Data: stock_adjustments
+-- Rows: 4
+-- Backup: 2026-03-11T18:43:46.935866
+
+INSERT INTO `stock_adjustments` (`id`, `intake_lot_id`, `mat_sap_code`, `re_code`, `material_description`, `adjust_type`, `adjust_reason`, `adjust_qty`, `prev_remain_vol`, `new_remain_vol`, `remark`, `adjusted_by`, `adjusted_at`) VALUES (1, 'intake-2026-02-23-003', '5113162841000024', 'Citric Acid', 'Citric Acid', 'decrease', 'Physical Count', 1.376, 19.376, 18.0, NULL, 'cj', '2026-03-05 11:25:47');
+INSERT INTO `stock_adjustments` (`id`, `intake_lot_id`, `mat_sap_code`, `re_code`, `material_description`, `adjust_type`, `adjust_reason`, `adjust_qty`, `prev_remain_vol`, `new_remain_vol`, `remark`, `adjusted_by`, `adjusted_at`) VALUES (2, 'intake-2026-02-28-001', '1216450241200075', 'FV036A', 'Peach Flavour Firmenich 050001 R10060', 'decrease', 'Physical Count', 5.0, 25.0, 20.0, NULL, 'cj', '2026-03-05 11:36:57');
+INSERT INTO `stock_adjustments` (`id`, `intake_lot_id`, `mat_sap_code`, `re_code`, `material_description`, `adjust_type`, `adjust_reason`, `adjust_qty`, `prev_remain_vol`, `new_remain_vol`, `remark`, `adjusted_by`, `adjusted_at`) VALUES (3, 'intake-2026-03-10-004', '1217150041000003', 'CL001A', 'Caramel Colour Class III (INS 150c).', 'decrease', 'Physical Count', 30.0, 180.0, 150.0, NULL, 'cj', '2026-03-10 10:17:52');
+INSERT INTO `stock_adjustments` (`id`, `intake_lot_id`, `mat_sap_code`, `re_code`, `material_description`, `adjust_type`, `adjust_reason`, `adjust_qty`, `prev_remain_vol`, `new_remain_vol`, `remark`, `adjusted_by`, `adjusted_at`) VALUES (4, 'intake-2026-03-10-004', '1217150041000003', 'CL001A', 'Caramel Colour Class III (INS 150c).', 'increase', 'Physical Count', 30.0, 150.0, 180.0, NULL, 'cj', '2026-03-10 10:18:30');

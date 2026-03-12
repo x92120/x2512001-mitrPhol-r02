@@ -1,0 +1,35 @@
+-- Table: production_batches
+-- Backup: 2026-03-11T18:43:46.935866
+
+CREATE TABLE `production_batches` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `plan_id` int NOT NULL,
+  `batch_id` varchar(100) NOT NULL,
+  `sku_id` varchar(50) NOT NULL,
+  `plant` varchar(50) DEFAULT NULL,
+  `batch_size` float DEFAULT NULL,
+  `status` varchar(50) DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `flavour_house` tinyint(1) DEFAULT '0',
+  `spp` tinyint(1) DEFAULT '0',
+  `batch_prepare` tinyint(1) DEFAULT '0',
+  `ready_to_product` tinyint(1) DEFAULT '0',
+  `production` tinyint(1) DEFAULT '0',
+  `done` tinyint(1) DEFAULT '0',
+  `fh_boxed_at` timestamp NULL DEFAULT NULL,
+  `spp_boxed_at` timestamp NULL DEFAULT NULL,
+  `fh_delivered_at` timestamp NULL DEFAULT NULL,
+  `fh_delivered_by` varchar(50) DEFAULT NULL,
+  `spp_delivered_at` timestamp NULL DEFAULT NULL,
+  `spp_delivered_by` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `ix_production_batches_batch_id` (`batch_id`),
+  KEY `plan_id` (`plan_id`),
+  KEY `ix_production_batches_id` (`id`),
+  KEY `idx_prod_batch_fh_boxed` (`fh_boxed_at`),
+  KEY `idx_prod_batch_spp_boxed` (`spp_boxed_at`),
+  KEY `idx_prod_batch_fh_delivered` (`fh_delivered_at`),
+  KEY `idx_prod_batch_spp_delivered` (`spp_delivered_at`),
+  CONSTRAINT `production_batches_ibfk_1` FOREIGN KEY (`plan_id`) REFERENCES `production_plans` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=125 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

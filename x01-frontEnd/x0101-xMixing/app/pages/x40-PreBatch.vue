@@ -383,6 +383,11 @@ const handleDoneClick = async () => {
     pendingAdvance.value = { batchId: currentBatchId, reCode: currentReCode }
 }
 
+const isScaleAtZero = computed(() => {
+    const tolerance = activeScale.value?.tolerance || 0.01
+    return Math.abs(actualScaleValue.value) <= tolerance * 2
+})
+
 const handleStartWeighting = () => {
     workflowStep.value = 4 // Manual Batching (Weighing)
 }
@@ -396,21 +401,19 @@ const handleStep7Confirm = (manual = false) => {
     const hasMorePkgsInCurrentBatch = packages.some(p => p.status === 'pending')
     
     if (!isBatchFinished && hasMorePkgsInCurrentBatch) {
-        // Popup for next package (bag/box) in the SAME batch
-        $q.dialog({
-            title: 'NEXT PREPARATION',
-            message: `Batch ${selectedBatch.value?.batch_id} still requires more packages. <br/>Proceed to prepare <b>next bag/box</b> for ${selectedReCode.value}? <br/>(Lot: ${selectedIntakeLotId.value})`,
-            ok: { label: 'Confirm & Next', color: 'blue-10', unelevated: true },
-            cancel: { label: 'Stop/Exit', flat: true, color: 'grey-7' },
-            html: true,
-            persistent: true
-        }).onOk(() => {
-            currentPackageOrigins.value = [] // Fresh container
-            workflowStep.value = 3
-            $q.notify({ type: 'info', message: 'Ready for next bag/box', position: 'top' })
+        // More packages needed (e.g. 1/3 → 2/3) — loop back to Step 3 silently
+        const completed = packages.filter(p => p.status === 'completed').length
+        const total = packages.length
+        currentPackageOrigins.value = [] // Fresh container
+        workflowStep.value = 3
+        $q.notify({ 
+            type: 'info', 
+            message: `Package ${completed}/${total} done — ready for next package`, 
+            position: 'top',
+            timeout: 2000
         })
     } else {
-        // Current batch is done for this ingredient, advance to the NEXT batch
+        // ALL packages for this batch are done → go to Step 2 (re-scan lot for next batch)
         handleAdvanceInternal()
     }
 }
@@ -438,21 +441,26 @@ const handleAdvanceInternal = async () => {
         
         // Popup for next Batch in the queue
         $q.dialog({
-            title: 'NEXT PRE-BATCH',
-            message: `Batch ${pendingAdvance.value.batchId} completed. <br/>Ready to start <b>NEXT BATCH</b> for ${pendingAdvance.value.reCode}? <br/>(Lot: ${selectedIntakeLotId.value})`,
-            ok: { label: 'Start Next Batch', color: 'blue-10', unelevated: true },
+            title: '✅ BATCH COMPLETE',
+            message: `Batch <b>${pendingAdvance.value.batchId}</b> — all packages done!<br/><br/>` +
+                     `Next: <b>Re-scan intake lot</b> for ${pendingAdvance.value.reCode}<br/>` +
+                     `<span class="text-grey-7">(ensures correct & permissible lot is used)</span>`,
+            ok: { label: 'Next Batch → Scan Lot', color: 'blue-10', unelevated: true },
             cancel: { label: 'Stop/Exit', flat: true, color: 'grey-7' },
             html: true,
             persistent: true
         }).onOk(async () => {
             await nextBatchPromise
             currentPackageOrigins.value = [] // Reset weighing data
-            // If still same ingredient after advance, loop to Step 3
+            // Clear lot and go to Step 2 — force re-scan for next batch
+            selectedIntakeLotId.value = ''
             if (selectedReCode.value === pendingAdvance.value?.reCode) {
-                workflowStep.value = 3
-                $q.notify({ type: 'info', message: `Advanced to: ${selectedBatch.value?.batch_id}`, position: 'top' })
+                workflowStep.value = 2
+                $q.notify({ type: 'info', message: `Scan lot for: ${selectedBatch.value?.batch_id}`, position: 'top' })
+                // Open scan dialog for lot verification
+                setTimeout(() => openScanDialog(), 300)
             } else {
-                workflowStep.value = selectedReCode.value ? 3 : 1
+                workflowStep.value = selectedReCode.value ? 2 : 1
             }
             pendingAdvance.value = null
         })
@@ -1150,9 +1158,8 @@ const refreshPlanData = async () => {
                     <tbody>
                         <template v-for="ing in selectableIngredients" :key="ing.re_code">
                             <tr 
-                                class="transition-all cursor-pointer"
+                                class="transition-all"
                                 :class="getIngredientRowClass(ing)"
-                                @click="openScanDialog(ing)"
                             >
                                 <td class="text-center" style="padding: 0;">
                                     <q-btn
@@ -1164,7 +1171,7 @@ const refreshPlanData = async () => {
                                     />
                                 </td>
                                 <td class="text-weight-bold transition-all" style="font-size: 0.75rem;">
-                                    <div class="cursor-pointer text-blue-9" @click.stop="openScanDialog(ing)">
+                                    <div class="text-blue-9">
                                         {{ ing.re_code }}
                                     </div>
                                     <q-tooltip>{{ ing.ingredient_name }}</q-tooltip>
@@ -1178,6 +1185,16 @@ const refreshPlanData = async () => {
                                     <q-badge v-else color="grey-6" label="Wait" size="sm" />
                                 </td>
                                 <td class="text-center">
+                                    <q-btn
+                                        v-if="ing.status < 2"
+                                        flat round dense
+                                        icon="scale"
+                                        size="xs"
+                                        color="blue-9"
+                                        @click.stop="openScanDialog(ing)"
+                                    >
+                                        <q-tooltip>Start Pre-Batch Weighing</q-tooltip>
+                                    </q-btn>
                                     <q-btn v-if="ing.status >= 1" flat round dense icon="print" size="xs" color="blue-9" @click.stop="printAllPlanLabels(ing)">
                                         <q-tooltip>Print All Labels for this Ingredient</q-tooltip>
                                     </q-btn>
@@ -1619,17 +1636,21 @@ const refreshPlanData = async () => {
                     <!-- Step 3: Start PreBatch -->
                     <div class="col-12 col-md-4">
                         <q-btn
-                            label="START"
-                            :color="workflowStep === 3 ? 'blue-10' : 'grey-4'"
-                            :text-color="workflowStep === 3 ? 'white' : 'grey-7'"
-                            icon="play_arrow"
+                            :label="workflowStep === 3 && !isScaleAtZero ? 'CLEAR SCALE' : 'START'"
+                            :color="workflowStep === 3 && isScaleAtZero ? 'blue-10' : 'grey-4'"
+                            :text-color="workflowStep === 3 && isScaleAtZero ? 'white' : 'grey-7'"
+                            :icon="workflowStep === 3 && !isScaleAtZero ? 'warning' : 'play_arrow'"
                             class="full-width"
                             style="height: 44px"
                             unelevated
                             @click="handleStartWeighting"
-                            :disable="workflowStep !== 3"
-                            :pulse="workflowStep === 3"
-                        />
+                            :disable="workflowStep !== 3 || !isScaleAtZero"
+                            :pulse="workflowStep === 3 && isScaleAtZero"
+                        >
+                            <q-tooltip v-if="workflowStep === 3 && !isScaleAtZero">
+                                Scale must read 0.00 before starting — clear and tare the scale first
+                            </q-tooltip>
+                        </q-btn>
                     </div>
 
                     <!-- Step 4 & 7: Done / Next Prep -->

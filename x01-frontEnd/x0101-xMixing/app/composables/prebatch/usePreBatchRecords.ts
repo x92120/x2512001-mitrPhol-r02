@@ -103,9 +103,8 @@ export function usePreBatchRecords(deps: RecordDeps) {
     const fetchPreBatchRecords = async () => {
         if (!deps.selectedProductionPlan.value && !deps.selectedBatch.value) return
         try {
-            const endpoint = deps.selectedProductionPlan.value
-                ? `${appConfig.apiBaseUrl}/prebatch-items/by-plan/${deps.selectedProductionPlan.value}`
-                : `${appConfig.apiBaseUrl}/prebatch-items/by-plan/${deps.selectedBatch.value.batch_id}`
+            const planId = deps.selectedProductionPlan.value || deps.selectedBatch.value.batch_id
+            const endpoint = `${appConfig.apiBaseUrl}/prebatch-recs/by-plan/${planId}`
 
             const data = await $fetch<any[]>(endpoint, {
                 headers: getAuthHeader() as Record<string, string>

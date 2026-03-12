@@ -1,0 +1,36 @@
+-- Table: ingredient_intake_lists
+-- Exported: 2026-03-11T18:36:01.328086
+
+CREATE TABLE `ingredient_intake_lists` (
+  `intake_lot_id` varchar(50) NOT NULL,
+  `lot_id` varchar(50) NOT NULL,
+  `intake_from` varchar(50) DEFAULT NULL,
+  `blind_code` varchar(50) DEFAULT NULL,
+  `mat_sap_code` varchar(50) NOT NULL,
+  `re_code` varchar(50) DEFAULT NULL,
+  `material_description` varchar(200) DEFAULT NULL,
+  `uom` varchar(20) DEFAULT NULL,
+  `intake_vol` float NOT NULL,
+  `remain_vol` float NOT NULL,
+  `intake_package_vol` float DEFAULT NULL,
+  `package_intake` int DEFAULT NULL,
+  `expire_date` datetime DEFAULT NULL,
+  `status` varchar(20) DEFAULT NULL,
+  `intake_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `intake_by` varchar(50) NOT NULL,
+  `edit_by` varchar(50) DEFAULT NULL,
+  `edit_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  `po_number` varchar(50) DEFAULT NULL,
+  `manufacturing_date` datetime DEFAULT NULL,
+  `batch_prepare_vol` float DEFAULT NULL,
+  `std_package_size` float DEFAULT NULL,
+  `intake_to` varchar(50) DEFAULT NULL,
+  `ext_date` datetime DEFAULT NULL,
+  `reserv_no` varchar(50) DEFAULT NULL,
+  `stock_zone` varchar(50) DEFAULT NULL,
+  `material_type` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`intake_lot_id`),
+  KEY `ix_ingredient_intake_lists_intake_lot_id` (`intake_lot_id`),
+  KEY `ix_ingredient_intake_lists_mat_sap_code` (`mat_sap_code`),
+  KEY `ix_ingredient_intake_lists_blind_code` (`blind_code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

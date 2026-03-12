@@ -95,6 +95,68 @@ def get_production_plans(skip: int = 0, limit: int = 1000, status: Optional[str]
                 "created_at": b.created_at, "updated_at": b.updated_at,
             })
     
+    # 2b. Fetch recheck/packing stats per batch from prebatch_recs, split by warehouse
+    batch_id_strs = []
+    for blist in batches_by_plan.values():
+        for bd in blist:
+            batch_id_strs.append(bd["batch_id"])
+    
+    recheck_map = {}
+    if batch_id_strs:
+        # Overall recheck stats
+        rc_rows = db.execute(sql_text("""
+            SELECT 
+                SUBSTRING_INDEX(r.batch_record_id, '-', 4) AS bid,
+                COUNT(*) AS total,
+                SUM(CASE WHEN r.recheck_status = 1 THEN 1 ELSE 0 END) AS recheck_ok,
+                SUM(CASE WHEN r.recheck_status = 2 THEN 1 ELSE 0 END) AS recheck_err,
+                SUM(CASE WHEN r.packing_status = 1 THEN 1 ELSE 0 END) AS packed
+            FROM prebatch_recs r
+            GROUP BY bid
+        """)).fetchall()
+        for r in rc_rows:
+            recheck_map[r.bid] = {
+                'total': int(r.total), 'recheck_ok': int(r.recheck_ok),
+                'recheck_err': int(r.recheck_err), 'packed': int(r.packed),
+                'fh_packed': 0, 'spp_packed': 0, 'fh_total': 0, 'spp_total': 0,
+            }
+        
+        # Per-warehouse packed counts (join with prebatch_reqs for wh)
+        wh_rows = db.execute(sql_text("""
+            SELECT 
+                SUBSTRING_INDEX(r.batch_record_id, '-', 4) AS bid,
+                COALESCE(q.wh, 'Mix') AS wh,
+                COUNT(*) AS total,
+                SUM(CASE WHEN r.packing_status = 1 THEN 1 ELSE 0 END) AS packed
+            FROM prebatch_recs r
+            LEFT JOIN prebatch_reqs q ON q.id = r.req_id
+            GROUP BY bid, wh
+        """)).fetchall()
+        for r in wh_rows:
+            if r.bid in recheck_map:
+                w = (r.wh or '').upper()
+                if w == 'FH':
+                    recheck_map[r.bid]['fh_packed'] = int(r.packed)
+                    recheck_map[r.bid]['fh_total'] = int(r.total)
+                elif w == 'SPP':
+                    recheck_map[r.bid]['spp_packed'] = int(r.packed)
+                    recheck_map[r.bid]['spp_total'] = int(r.total)
+    
+    # Inject recheck stats into batch dicts
+    empty_rc = {'total': 0, 'recheck_ok': 0, 'recheck_err': 0, 'packed': 0,
+                'fh_packed': 0, 'spp_packed': 0, 'fh_total': 0, 'spp_total': 0}
+    for blist in batches_by_plan.values():
+        for bd in blist:
+            rc = recheck_map.get(bd["batch_id"], empty_rc)
+            bd["recheck_total"] = rc['total']
+            bd["recheck_ok"] = rc['recheck_ok']
+            bd["recheck_err"] = rc['recheck_err']
+            bd["packed"] = rc['packed']
+            bd["fh_packed"] = rc['fh_packed']
+            bd["spp_packed"] = rc['spp_packed']
+            bd["fh_total"] = rc['fh_total']
+            bd["spp_total"] = rc['spp_total']
+    
     # 3. Fetch aggregated ingredients per plan (single query)
     ingredients_by_plan: dict = {}
     plan_id_strs = [p.plan_id for p in plans if p.plan_id]
@@ -105,6 +167,7 @@ def get_production_plans(skip: int = 0, limit: int = 1000, status: Optional[str]
                 r.re_code,
                 r.ingredient_name,
                 i.warehouse AS wh,
+                i.mat_sap_code,
                 r.required_volume AS vol_per_batch,
                 SUM(r.required_volume) AS total_vol
             FROM prebatch_reqs r
@@ -121,6 +184,7 @@ def get_production_plans(skip: int = 0, limit: int = 1000, status: Optional[str]
                 ingredients_by_plan[pid] = []
             ingredients_by_plan[pid].append({
                 "re_code": r.re_code,
+                "mat_sap_code": r.mat_sap_code or "",
                 "name": r.ingredient_name or r.re_code,
                 "wh": r.wh or "-",
                 "vol_per_batch": float(r.vol_per_batch or 0),
@@ -215,19 +279,83 @@ def get_production_batches(skip: int = 0, limit: int = 1000, db: Session = Depen
 
 # NOTE: This must come BEFORE /production-batches/{batch_id} to avoid route conflict
 @router.get("/production-batches/ready-to-deliver")
-def get_ready_to_deliver(db: Session = Depends(get_db)):
-    """Get batches that have at least one boxed warehouse but are not yet delivered."""
-    batches = db.query(models.ProductionBatch).filter(
-        (models.ProductionBatch.fh_boxed_at.isnot(None)) | (models.ProductionBatch.spp_boxed_at.isnot(None)),
-    ).all()
+def get_ready_to_deliver(show_all: bool = False, db: Session = Depends(get_db)):
+    """Get batches that have at least one boxed warehouse but are not yet delivered.
+    If show_all=True, returns ALL batches with full status pipeline."""
+    if show_all:
+        batches = db.query(models.ProductionBatch).all()
+    else:
+        batches = db.query(models.ProductionBatch).filter(
+            (models.ProductionBatch.fh_boxed_at.isnot(None)) | (models.ProductionBatch.spp_boxed_at.isnot(None)),
+        ).all()
+
+    # Get recheck/packing summary from prebatch_recs per batch
+    recheck_map = {}
+    if show_all:
+        from sqlalchemy import text as sql_text2
+        # Overall recheck stats
+        rc_rows = db.execute(sql_text2("""
+            SELECT
+                SUBSTRING_INDEX(r.batch_record_id, '-', 4) AS bid,
+                COUNT(*) AS total,
+                SUM(CASE WHEN r.recheck_status = 1 THEN 1 ELSE 0 END) AS recheck_ok,
+                SUM(CASE WHEN r.recheck_status = 2 THEN 1 ELSE 0 END) AS recheck_err,
+                SUM(CASE WHEN r.packing_status = 1 THEN 1 ELSE 0 END) AS packed
+            FROM prebatch_recs r
+            GROUP BY bid
+        """)).fetchall()
+        for r in rc_rows:
+            recheck_map[r.bid] = {
+                'total': int(r.total), 'recheck_ok': int(r.recheck_ok),
+                'recheck_err': int(r.recheck_err), 'packed': int(r.packed),
+                'fh_packed': 0, 'spp_packed': 0, 'fh_total': 0, 'spp_total': 0,
+            }
+        # Per-warehouse packed counts
+        wh_rows = db.execute(sql_text2("""
+            SELECT
+                SUBSTRING_INDEX(r.batch_record_id, '-', 4) AS bid,
+                COALESCE(q.wh, 'Mix') AS wh,
+                COUNT(*) AS total,
+                SUM(CASE WHEN r.packing_status = 1 THEN 1 ELSE 0 END) AS packed
+            FROM prebatch_recs r
+            LEFT JOIN prebatch_reqs q ON q.id = r.req_id
+            GROUP BY bid, wh
+        """)).fetchall()
+        for r in wh_rows:
+            if r.bid in recheck_map:
+                w = (r.wh or '').upper()
+                if w == 'FH':
+                    recheck_map[r.bid]['fh_packed'] = int(r.packed)
+                    recheck_map[r.bid]['fh_total'] = int(r.total)
+                elif w == 'SPP':
+                    recheck_map[r.bid]['spp_packed'] = int(r.packed)
+                    recheck_map[r.bid]['spp_total'] = int(r.total)
+
+    empty_rc = {'total': 0, 'recheck_ok': 0, 'recheck_err': 0, 'packed': 0,
+                'fh_packed': 0, 'spp_packed': 0, 'fh_total': 0, 'spp_total': 0}
     result = []
     for b in batches:
+        rc = recheck_map.get(b.batch_id, empty_rc)
         result.append({
             "id": b.id,
             "batch_id": b.batch_id,
             "sku_id": b.sku_id,
             "plant": b.plant,
+            "batch_size": b.batch_size,
             "production": bool(b.production),
+            "flavour_house": bool(b.flavour_house),
+            "spp": bool(b.spp),
+            "batch_prepare": bool(b.batch_prepare),
+            "ready_to_product": bool(b.ready_to_product),
+            "done": bool(b.done),
+            "recheck_total": rc['total'],
+            "recheck_ok": rc['recheck_ok'],
+            "recheck_err": rc['recheck_err'],
+            "packed": rc['packed'],
+            "fh_packed": rc['fh_packed'],
+            "spp_packed": rc['spp_packed'],
+            "fh_total": rc['fh_total'],
+            "spp_total": rc['spp_total'],
             "fh_boxed_at": b.fh_boxed_at.isoformat() if b.fh_boxed_at else None,
             "spp_boxed_at": b.spp_boxed_at.isoformat() if b.spp_boxed_at else None,
             "fh_delivered_at": b.fh_delivered_at.isoformat() if b.fh_delivered_at else None,
@@ -941,6 +1069,91 @@ def verify_bag_scan(data: RecheckBagRequest, db: Session = Depends(get_db)):
         }
     }
 
+
+@router.post("/prebatch-items/repair-overwrite-bug")
+def repair_overwrite_bug(plan_id: Optional[str] = None, db: Session = Depends(get_db)):
+    """Repair data corrupted by the pack_item overwrite bug.
+    
+    Finds PreBatchItems where:
+    - status == 2 (incorrectly marked complete)
+    - net_volume < required_volume (only last package's weight was kept)
+    - No matching PreBatchRec records exist (old code didn't create them)
+    
+    Resets these items so operators can re-weigh the missing packages.
+    """
+    query = db.query(models.PreBatchItem).filter(
+        models.PreBatchItem.status == 2,
+        models.PreBatchItem.net_volume.isnot(None),
+    )
+    if plan_id:
+        query = query.filter(models.PreBatchItem.plan_id == plan_id)
+    
+    items = query.all()
+    repaired = []
+    
+    for item in items:
+        net = float(item.net_volume or 0)
+        req = float(item.required_volume or 0)
+        
+        # Skip items where net_volume is close to or exceeds required_volume
+        if req > 0 and net >= req * 0.95:
+            continue
+        
+        # Check if PreBatchRec records exist for this item's req
+        req_obj = db.query(models.PreBatchReq).filter(
+            models.PreBatchReq.batch_id == item.batch_id,
+            models.PreBatchReq.re_code == item.re_code,
+        ).first()
+        
+        rec_count = 0
+        if req_obj:
+            rec_count = db.query(models.PreBatchRec).filter(
+                models.PreBatchRec.req_id == req_obj.id,
+            ).count()
+        
+        # If no recs exist and net < required, this item was corrupted
+        if rec_count == 0 and net < req * 0.95:
+            old_status = item.status
+            old_net = item.net_volume
+            
+            # Reset: clear net_volume to 0 so operator re-weighs from scratch
+            item.status = 0  # Back to Wait
+            item.net_volume = None
+            item.batch_record_id = None
+            item.package_no = None
+            item.total_packages = None
+            item.prebatch_id = None
+            item.packing_status = 0
+            
+            # Also reset the PreBatchReq status
+            if req_obj:
+                req_obj.status = 0
+            
+            # Reset batch.batch_prepare if it was auto-finalized
+            batch = db.query(models.ProductionBatch).filter(
+                models.ProductionBatch.id == item.batch_db_id
+            ).first()
+            if batch and batch.batch_prepare:
+                batch.batch_prepare = False
+                if batch.status == "Prepared":
+                    batch.status = "In-Progress"
+            
+            repaired.append({
+                "item_id": item.id,
+                "batch_id": item.batch_id,
+                "re_code": item.re_code,
+                "old_status": old_status,
+                "old_net_volume": float(old_net or 0),
+                "required_volume": req,
+                "action": "reset to Wait — operator must re-weigh all packages",
+            })
+    
+    db.commit()
+    return {
+        "repaired_count": len(repaired),
+        "repaired_items": repaired,
+    }
+
 @router.patch("/production-batches/{batch_id}/release")
 def release_batch_to_production(batch_id: str, db: Session = Depends(get_db)):
     """
@@ -1000,3 +1213,89 @@ def sync_prebatch_warehouse(db: Session = Depends(get_db)):
         "ingredients_set_to_mix": r1.rowcount,
         "prebatch_reqs_synced": r2.rowcount
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# Label Archive — Save & Reprint from file
+# ═══════════════════════════════════════════════════════════════
+import os
+from pydantic import BaseModel
+
+LABEL_ARCHIVE_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "x91-labelArchive")
+
+
+class LabelArchiveRequest(BaseModel):
+    label_type: str  # e.g. "prebatch-label", "packingbox-label"
+    label_id: str    # e.g. "P260311-02-02-001-FV044A-1"
+    svg_content: str
+    metadata: Optional[dict] = None
+
+
+@router.post("/labels/archive")
+def archive_label(req: LabelArchiveRequest):
+    """Save a label SVG to the archive folder."""
+    now = datetime.now()
+    date_folder = now.strftime("%Y-%m-%d")
+    time_prefix = now.strftime("%H%M%S")
+    safe_id = req.label_id.replace("/", "_").replace("\\", "_")
+    
+    folder = os.path.join(LABEL_ARCHIVE_ROOT, req.label_type, date_folder)
+    os.makedirs(folder, exist_ok=True)
+    
+    filename = f"{time_prefix}_{safe_id}.svg"
+    filepath = os.path.join(folder, filename)
+    
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(req.svg_content)
+    
+    # Save metadata JSON alongside
+    if req.metadata:
+        import json
+        meta_path = filepath.replace(".svg", ".json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({**req.metadata, "archived_at": now.isoformat(), "label_id": req.label_id}, f, indent=2, default=str)
+    
+    return {
+        "status": "saved",
+        "path": f"{req.label_type}/{date_folder}/{filename}",
+        "archived_at": now.isoformat()
+    }
+
+
+@router.get("/labels/archive")
+def list_archived_labels(label_type: Optional[str] = None, date: Optional[str] = None):
+    """List archived labels, optionally filtered by type and date."""
+    results = []
+    if not os.path.exists(LABEL_ARCHIVE_ROOT):
+        return results
+    
+    types = [label_type] if label_type else os.listdir(LABEL_ARCHIVE_ROOT)
+    for lt in types:
+        lt_path = os.path.join(LABEL_ARCHIVE_ROOT, lt)
+        if not os.path.isdir(lt_path):
+            continue
+        dates = [date] if date else sorted(os.listdir(lt_path), reverse=True)
+        for d in dates:
+            d_path = os.path.join(lt_path, d)
+            if not os.path.isdir(d_path):
+                continue
+            for f in sorted(os.listdir(d_path)):
+                if f.endswith(".svg"):
+                    results.append({
+                        "label_type": lt,
+                        "date": d,
+                        "filename": f,
+                        "path": f"{lt}/{d}/{f}",
+                    })
+    return results
+
+
+@router.get("/labels/archive/file/{label_type}/{date}/{filename}")
+def get_archived_label(label_type: str, date: str, filename: str):
+    """Get a specific archived label SVG content."""
+    filepath = os.path.join(LABEL_ARCHIVE_ROOT, label_type, date, filename)
+    if not os.path.exists(filepath):
+        raise HTTPException(status_code=404, detail="Label not found")
+    with open(filepath, "r", encoding="utf-8") as f:
+        return {"svg": f.read(), "path": f"{label_type}/{date}/{filename}"}
+

@@ -57,6 +57,19 @@ export function usePreBatchLabels(deps: LabelDeps) {
     const showPackingBoxLabelDialog = ref(false)
     const renderedPackingBoxLabel = ref('')
 
+    // --- Archive helper: save label SVG to server file system ---
+    const archiveLabel = async (labelType: string, labelId: string, svgContent: string, metadata?: any) => {
+        try {
+            await $fetch(`${appConfig.apiBaseUrl}/labels/archive`, {
+                method: 'POST',
+                body: { label_type: labelType, label_id: labelId, svg_content: svgContent, metadata },
+                headers: getAuthHeader() as Record<string, string>
+            })
+        } catch (e) {
+            console.warn('[LabelArchive] Failed to archive label:', e)
+        }
+    }
+
     // --- Shared label-data helpers ---
     const buildLotStrings = (origins: any[] | undefined, fallbackLotId?: string, fallbackVol?: number) => ({
         Lot1: origins?.[0] ? `1. ${origins[0].intake_lot_id} / ${(origins[0].take_volume || 0).toFixed(4)} kg` : (fallbackLotId ? `1. ${fallbackLotId} / ${(fallbackVol ?? 0).toFixed(4)} kg` : ''),
@@ -133,7 +146,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
             totalVol: deps.requireVolume.value,
             pkgNo,
             totalPkgs,
-            qrCode: `${deps.selectedBatch.value.plan_id},${deps.selectedBatch.value.batch_id},${deps.selectedBatch.value.batch_id}${deps.selectedReCode.value}${String(pkgNo).padStart(2, '0')},${deps.selectedReCode.value},${capturedScaleValue.value}`,
+            qrCode: JSON.stringify({b:deps.selectedBatch.value.batch_id, m:ing?.mat_sap_code||'', p:`${pkgNo}/${totalPkgs}`, n:capturedScaleValue.value, t:deps.requireVolume.value}),
             timestamp: formatDate(new Date().toISOString()),
             origins: deps.currentPackageOrigins.value.length > 0 ? deps.currentPackageOrigins.value : undefined,
         })
@@ -213,7 +226,16 @@ export function usePreBatchLabels(deps: LabelDeps) {
             })
             if (labelDataMapping.value) {
                 const svg = await generateLabelSvg('prebatch-label_4x3', labelDataMapping.value)
-                if (svg) printLabel(svg)
+                if (svg) {
+                    printLabel(svg)
+                    archiveLabel('prebatch-label', packageLabelId.value, svg, {
+                        plan_id: deps.selectedProductionPlan.value,
+                        batch_id: doneBatchId,
+                        re_code: doneReCode,
+                        package_no: pkgNo,
+                        net_volume: capturedScaleValue.value,
+                    })
+                }
             }
             $q.notify({ type: 'positive', message: t('preBatch.saveAndPrintSuccess'), position: 'top' })
             await deps.fetchPreBatchRecords()
@@ -279,7 +301,7 @@ export function usePreBatchLabels(deps: LabelDeps) {
                 netVol: Number(record.net_volume),
                 totalVol: Number(record.total_volume),
                 pkgNo: record.package_no,
-                qrCode: `${deps.selectedBatch.value.plan_id},${record.batch_record_id},${record.prebatch_id || ''},${record.re_code},${record.net_volume}`,
+                qrCode: JSON.stringify({b:deps.selectedBatch.value.batch_id, m:record.mat_sap_code||'', p:`${record.package_no}/${record.total_packages||1}`, n:Number(record.net_volume), t:Number(record.total_volume||record.total_request_volume||0)}),
                 timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
                 origins: record.origins?.length > 0 ? record.origins : undefined,
                 fallbackLotId: record.intake_lot_id,
@@ -287,6 +309,13 @@ export function usePreBatchLabels(deps: LabelDeps) {
             const svg = await generateLabelSvg('prebatch-label_4x3', data)
             if (svg) {
                 printLabel(svg)
+                archiveLabel('prebatch-label', record.batch_record_id || 'reprint', svg, {
+                    plan_id: record.plan_id,
+                    re_code: record.re_code,
+                    package_no: record.package_no,
+                    net_volume: record.net_volume,
+                    reprint: true,
+                })
                 $q.notify({ type: 'info', message: 'Reprinting label...', position: 'top', timeout: 800 })
             }
         } catch (err) {
@@ -361,13 +390,16 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     totalVol: Number(record.total_volume),
                     pkgNo: record.package_no,
                     totalPkgs: record.total_packages || 1,
-                    qrCode: `${deps.selectedProductionPlan.value},${record.batch_record_id},${record.prebatch_id || ''},${record.re_code},${record.net_volume}`,
+                    qrCode: JSON.stringify({b:batchId, m:record.mat_sap_code||'', p:`${record.package_no}/${record.total_packages||1}`, n:Number(record.net_volume), t:Number(record.total_volume||record.total_request_volume||0)}),
                     timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
                     origins: record.origins?.length > 0 ? record.origins : undefined,
                     fallbackLotId: record.intake_lot_id,
                 })
                 const svg = await generateLabelSvg('prebatch-label_4x3', data)
-                if (svg) allSvgs.push(svg)
+                if (svg) {
+                    allSvgs.push(svg)
+                    archiveLabel('prebatch-label', record.batch_record_id, svg, { plan_id: record.plan_id, re_code: record.re_code, package_no: record.package_no, net_volume: record.net_volume })
+                }
             } catch (err) {
                 console.error('Error generating label:', err)
             }
@@ -424,13 +456,16 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     totalVol: Number(record.total_volume),
                     pkgNo: record.package_no,
                     totalPkgs: record.total_packages || 1,
-                    qrCode: `${deps.selectedProductionPlan.value},${record.batch_record_id},${record.prebatch_id || ''},${record.re_code},${record.net_volume}`,
+                    qrCode: JSON.stringify({b:batchId, m:record.mat_sap_code||'', p:`${record.package_no}/${record.total_packages||1}`, n:Number(record.net_volume), t:Number(record.total_volume||record.total_request_volume||0)}),
                     timestamp: new Date(record.created_at || Date.now()).toLocaleString('en-GB'),
                     origins: record.origins?.length > 0 ? record.origins : undefined,
                     fallbackLotId: record.intake_lot_id,
                 })
                 const svg = await generateLabelSvg('prebatch-label_4x3', data)
-                if (svg) allSvgs.push(svg)
+                if (svg) {
+                    allSvgs.push(svg)
+                    archiveLabel('prebatch-label', record.batch_record_id, svg, { plan_id: record.plan_id, re_code: record.re_code, package_no: record.package_no, net_volume: record.net_volume })
+                }
             } catch (err) {
                 console.error('Error generating label:', err)
             }
@@ -468,13 +503,16 @@ export function usePreBatchLabels(deps: LabelDeps) {
                     totalVol: requiredVolume,
                     pkgNo: pkg.pkg_no,
                     totalPkgs: packages.length,
-                    qrCode: `${batch.plan_id},${batchId}-${reCode}-${pkg.pkg_no},${pkg.log?.prebatch_id || ''},${reCode},${volume}`,
+                    qrCode: JSON.stringify({b:batchId, m:ing?.mat_sap_code||'', p:`${pkg.pkg_no}/${packages.length}`, n:volume, t:requiredVolume}),
                     timestamp: pkg.log ? new Date(pkg.log.created_at || Date.now()).toLocaleString('en-GB') : new Date().toLocaleString('en-GB'),
                     origins: pkg.log?.origins?.length > 0 ? pkg.log.origins : undefined,
                     fallbackLotId: pkg.log?.intake_lot_id,
                 })
                 const svg = await generateLabelSvg('prebatch-label_4x3', data)
-                if (svg) allSvgs.push(svg)
+                if (svg) {
+                    allSvgs.push(svg)
+                    archiveLabel('prebatch-label', `${batchId}-${reCode}-${pkg.pkg_no}`, svg, { batch_id: batchId, re_code: reCode, package_no: pkg.pkg_no, net_volume: volume })
+                }
             } catch (err) {
                 console.error(`Error generating label #${pkg.pkg_no}:`, err)
             }

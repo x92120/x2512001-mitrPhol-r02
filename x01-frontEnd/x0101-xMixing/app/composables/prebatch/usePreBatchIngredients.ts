@@ -163,27 +163,48 @@ export function usePreBatchIngredients(deps: IngredientDeps) {
     const isBatchRowExpanded = (key: string) => expandedBatchRows.value.includes(key)
 
     const getPackagePlan = (batchId: string, reCode: string, requiredVolume: number) => {
-        const ingInfo = deps.ingredients.value.find((i: any) => i.re_code === reCode)
-        // Prioritize current manual selection (deps.packageSize) over master data default
-        let pkgSize = deps.packageSize.value || ingInfo?.std_package_size || 0
         if (requiredVolume <= 0) return []
-        if (pkgSize <= 0) pkgSize = requiredVolume
-        const totalPkgs = Math.ceil(requiredVolume / pkgSize)
+
+        // Find actual PreBatchRec records for this batch + ingredient
         const actuals = deps.preBatchLogs.value
             .filter((log: any) => log.re_code === reCode && log.batch_record_id.startsWith(batchId))
             .sort((a: any, b: any) => a.package_no - b.package_no)
+
+        // If we have records, use total_packages from the records to determine pkg count
+        if (actuals.length > 0) {
+            const totalPkgs = actuals[0]?.total_packages || actuals.length
+            const packages: any[] = []
+            for (let i = 1; i <= totalPkgs; i++) {
+                const actual = actuals.find((a: any) => a.package_no === i)
+                packages.push({
+                    pkg_no: i,
+                    target: actual?.net_volume || 0,
+                    actual: actual?.net_volume || null,
+                    status: actual ? 'done' : 'pending',
+                    completed: actual ? 'completed' : 'pending',
+                    log: actual || null
+                })
+            }
+            return packages
+        }
+
+        // No records yet — fall back to calculation from packageSize
+        const ingInfo = deps.ingredients.value.find((i: any) => i.re_code === reCode)
+        let pkgSize = deps.packageSize.value || ingInfo?.std_package_size || 0
+        if (pkgSize <= 0) pkgSize = requiredVolume
+        const totalPkgs = Math.ceil(requiredVolume / pkgSize)
         const packages: any[] = []
         let remain = requiredVolume
         for (let i = 1; i <= totalPkgs; i++) {
             const target = Math.min(remain, pkgSize)
             remain -= target
-            const actual = actuals.find((a: any) => a.package_no === i)
             packages.push({
                 pkg_no: i,
                 target,
-                actual: actual?.net_volume || null,
-                status: actual ? 'done' : 'pending',
-                log: actual || null
+                actual: null,
+                status: 'pending',
+                completed: 'pending',
+                log: null
             })
         }
         return packages

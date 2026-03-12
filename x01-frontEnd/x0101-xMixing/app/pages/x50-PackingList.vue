@@ -524,7 +524,11 @@ const fetchBatchReqs = async (batch: any) => {
 /** Fetch ready-to-deliver batches from the database */
 const fetchReadyToDeliver = async () => {
   try {
-    const data = await $fetch<any[]>(`${appConfig.apiBaseUrl}/production-batches/ready-to-deliver`, {
+    const showAll = filterDeliveryStatus.value === 'SHOW_ALL'
+    const url = showAll
+      ? `${appConfig.apiBaseUrl}/production-batches/ready-to-deliver?show_all=true`
+      : `${appConfig.apiBaseUrl}/production-batches/ready-to-deliver`
+    const data = await $fetch<any[]>(url, {
       headers: getAuthHeader() as Record<string, string>
     })
     // Convert API response to TransferredBox entries
@@ -559,10 +563,13 @@ const fetchReadyToDeliver = async () => {
       }
     }
     transferredBoxes.value = boxes
+    // Store raw data for Show All status table
+    allBatchStatuses.value = data || []
   } catch (e) {
     console.error('Error fetching ready-to-deliver:', e)
   }
 }
+
 
 
 const fetchAllRecords = async () => {
@@ -683,16 +690,27 @@ interface TransferredBox {
   batch_id: string
   bagsCount: number
   time: string
-  inProduction: boolean  // batch.production flag — hides from delivery panel
+  inProduction: boolean
+  // Status pipeline flags
+  batch_size?: number
+  flavour_house?: boolean
+  spp_flag?: boolean
+  batch_prepare?: boolean
+  ready_to_product?: boolean
+  production_flag?: boolean
+  done?: boolean
 }
 const transferredBoxes = ref<TransferredBox[]>([])
+const allBatchStatuses = ref<any[]>([])
 
 // ── Transfer Dialog ──────────────────────────────────────────────
 const showTransferDialog   = ref(false)
 const selectedForTransfer  = ref<string[]>([])   // list of TransferredBox.id
 const filterDeliveryWh     = ref<'ALL'|'FH'|'SPP'>('ALL')
-const filterDeliveryStatus = ref<'ALL'|'WAITING'>('WAITING')  // ALL=show delivered too, WAITING=pending only
+const filterDeliveryStatus = ref<'SHOW_ALL'|'ALL'|'WAITING'>('WAITING')  // SHOW_ALL=show everything, ALL=show delivered too, WAITING=pending only
 const deliveredMap         = ref<Map<string, string>>(new Map())  // "batch_id-WH" → delivery time
+
+watch(filterDeliveryStatus, () => { fetchReadyToDeliver() })
 
 const markDelivered = async (batch_id: string, wh: 'FH' | 'SPP') => {
   const label = wh === 'FH' ? 'FH → SPP' : 'SPP → Production'
@@ -997,12 +1015,31 @@ const processBagScan = async (rawScan: string) => {
   let inferredBatchId = null
   let scannedReCode = ''
 
-  // 1) Parse comma-separated barcode format:
+  // 1a) Parse NEW JSON QR format:
+  //    {"b":"P260311-02-02-002","m":"1234567890","p":"1/2","n":5.398,"t":10.71}
+  if (rawScan.trim().startsWith('{')) {
+    try {
+      const qr = JSON.parse(rawScan.trim())
+      if (qr.b) {
+        inferredBatchId = qr.b
+        // Look up re_code from mat_sap_code
+        if (qr.m) {
+          const matchedIng = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP].find((i: any) => i.mat_sap_code === qr.m)
+          if (matchedIng) scannedReCode = matchedIng.re_code
+        }
+        barcode = `${qr.b}-${scannedReCode || qr.m}`
+      }
+    } catch (e) {
+      // Not valid JSON, fall through to other parsers
+    }
+  }
+
+  // 1b) Parse OLD comma-separated barcode format:
   //    Format A: "seq,batchId,concatPrebatchId,reCode,weight"
   //      e.g. "9,P260311-03-03-001,P260311-03-03-001FV021A01,FV021A,2"
   //    Format B: "planId,prebatchId,,reCode,weight"
   //      e.g. "P260311-01-01,P260311-01-01-001-CL001A-1,,CL001A,0.24"
-  if (rawScan.includes(',')) {
+  if (!inferredBatchId && rawScan.includes(',')) {
     const parts = rawScan.split(',')
     if (parts.length >= 4) {
       const field0 = parts[0]?.trim() || ''
@@ -1887,7 +1924,7 @@ onMounted(async () => {
               <div class="row items-center q-gutter-xs">
                 <q-select
                   v-model="filterDeliveryStatus"
-                  :options="[{ label: 'All', value: 'ALL' }, { label: 'Waiting', value: 'WAITING' }]"
+                  :options="[{ label: 'Show All', value: 'SHOW_ALL' }, { label: 'All', value: 'ALL' }, { label: 'Waiting', value: 'WAITING' }]"
                   emit-value map-options dense outlined
                   style="min-width:80px;background:rgba(255,255,255,0.15);border-radius:4px;"
                   input-class="text-white text-caption"
@@ -1897,6 +1934,7 @@ onMounted(async () => {
                 />
                 <q-badge color="white" text-color="indigo-7" class="text-weight-bold">
                   {{ groupedTransferredBoxes.filter(r => {
+                    if (filterDeliveryStatus === 'SHOW_ALL') return true
                     if (r.inProduction) return false
                     const hasWh = filterMiddleWh === 'FH' ? !!r.fh : !!r.spp
                     const isDelivered = filterMiddleWh === 'FH' ? !!deliveredMap.get(`${r.batch_id}-FH`) : !!deliveredMap.get(`${r.batch_id}-SPP`)
@@ -1923,7 +1961,99 @@ onMounted(async () => {
 
           <div class="col relative-position">
             <q-scroll-area class="fit bg-white">
-              <q-list dense separator>
+              <!-- ═══ SHOW ALL: Status Pipeline Table ═══ -->
+              <template v-if="filterDeliveryStatus === 'SHOW_ALL'">
+                <table style="width:100%;border-collapse:collapse;font-size:0.72rem;">
+                  <thead>
+                    <tr style="background:#e3f2fd;position:sticky;top:0;z-index:1;">
+                      <th style="text-align:left;padding:4px 6px;border-bottom:2px solid #ccc;">Batch ID</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:50px;">Size</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:40px;">FH</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:40px;">SPP</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:55px;">ReCheck</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:45px;">Ready</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:40px;">Prod</th>
+                      <th style="text-align:center;padding:4px 4px;border-bottom:2px solid #ccc;width:40px;">Done</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="b in allBatchStatuses" :key="b.batch_id"
+                        :style="{background: b.done ? '#e8f5e9' : b.production ? '#fffde7' : ''}"
+                        style="border-bottom:1px solid #eee;">
+                      <td style="padding:3px 6px;font-family:monospace;font-weight:600;">{{ b.batch_id }}</td>
+                      <td style="text-align:center;padding:3px 4px;">{{ b.batch_size }}</td>
+                      <!-- FH: boxed? -->
+                      <td style="text-align:center;">
+                        <q-icon v-if="b.fh_boxed_at" name="check_circle" color="blue" size="16px">
+                          <q-tooltip>FH Box Closed ✅</q-tooltip>
+                        </q-icon>
+                        <q-icon v-else-if="b.fh_packed > 0" name="pending" color="amber" size="16px">
+                          <q-tooltip>FH Preparing {{ b.fh_packed }}/{{ b.fh_total }} packed</q-tooltip>
+                        </q-icon>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-4" size="16px" />
+                      </td>
+                      <!-- SPP: boxed? -->
+                      <td style="text-align:center;">
+                        <q-icon v-if="b.spp_boxed_at" name="check_circle" color="light-blue" size="16px">
+                          <q-tooltip>SPP Box Closed ✅</q-tooltip>
+                        </q-icon>
+                        <q-icon v-else-if="b.spp_packed > 0" name="pending" color="amber" size="16px">
+                          <q-tooltip>SPP Preparing {{ b.spp_packed }}/{{ b.spp_total }} packed</q-tooltip>
+                        </q-icon>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-4" size="16px" />
+                      </td>
+                      <!-- ReCheck: from DB -->
+                      <td style="text-align:center;">
+                        <template v-if="b.recheck_total > 0 && b.recheck_ok === b.recheck_total && b.fh_boxed_at && b.spp_boxed_at">
+                          <q-icon name="verified" color="green" size="16px">
+                            <q-tooltip>All {{ b.recheck_ok }}/{{ b.recheck_total }} checked ✅</q-tooltip>
+                          </q-icon>
+                        </template>
+                        <template v-else-if="b.recheck_ok > 0">
+                          <q-icon name="pending" color="amber" size="16px">
+                            <q-tooltip>{{ b.recheck_ok }}/{{ b.recheck_total }} checked</q-tooltip>
+                          </q-icon>
+                        </template>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-4" size="16px" />
+                      </td>
+                      <!-- Ready -->
+                      <td style="text-align:center;">
+                        <q-icon v-if="b.ready_to_product" name="check_circle" color="teal" size="16px">
+                          <q-tooltip>Ready to Production</q-tooltip>
+                        </q-icon>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-4" size="16px" />
+                      </td>
+                      <!-- Prod -->
+                      <td style="text-align:center;">
+                        <template v-if="b.done">
+                          <q-icon name="check_circle" color="green" size="16px">
+                            <q-tooltip>Production Finished</q-tooltip>
+                          </q-icon>
+                        </template>
+                        <template v-else-if="b.production">
+                          <q-icon name="pending" color="amber-8" size="16px">
+                            <q-tooltip>Production In Process</q-tooltip>
+                          </q-icon>
+                        </template>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-4" size="16px" />
+                      </td>
+                      <!-- Done -->
+                      <td style="text-align:center;">
+                        <q-icon v-if="b.done" name="check_circle" color="green-8" size="16px">
+                          <q-tooltip>All Done</q-tooltip>
+                        </q-icon>
+                        <q-icon v-else name="radio_button_unchecked" color="grey-4" size="16px" />
+                      </td>
+                    </tr>
+                    <tr v-if="allBatchStatuses.length === 0">
+                      <td colspan="8" style="text-align:center;padding:20px;color:#999;">No batches found</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </template>
+
+              <!-- ═══ Normal View: Delivery List ═══ -->
+              <q-list v-else dense separator>
                 <template v-for="row in groupedTransferredBoxes" :key="row.batch_id">
                   <q-item
                     v-if="(() => {

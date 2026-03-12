@@ -1,0 +1,38 @@
+-- Table: prebatch_recs
+-- Exported: 2026-03-11T18:36:02.034101
+
+CREATE TABLE `prebatch_recs` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `req_id` int DEFAULT NULL,
+  `batch_record_id` varchar(100) NOT NULL,
+  `plan_id` varchar(50) DEFAULT NULL,
+  `re_code` varchar(50) DEFAULT NULL,
+  `package_no` int DEFAULT NULL,
+  `total_packages` int DEFAULT NULL,
+  `net_volume` float DEFAULT NULL,
+  `total_volume` float DEFAULT NULL,
+  `total_request_volume` float DEFAULT NULL,
+  `intake_lot_id` varchar(50) DEFAULT NULL,
+  `mat_sap_code` varchar(50) DEFAULT NULL,
+  `prebatch_id` varchar(100) DEFAULT NULL,
+  `recode_batch_id` varchar(50) DEFAULT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  `recheck_status` int DEFAULT '0',
+  `recheck_at` datetime DEFAULT NULL,
+  `recheck_by` varchar(100) DEFAULT NULL,
+  `packing_status` int DEFAULT '0',
+  `packed_at` timestamp NULL DEFAULT NULL,
+  `packed_by` varchar(50) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `ix_prebatch_recs_batch_record_id` (`batch_record_id`),
+  KEY `req_id` (`req_id`),
+  KEY `ix_prebatch_recs_intake_lot_id` (`intake_lot_id`),
+  KEY `ix_prebatch_recs_id` (`id`),
+  KEY `ix_prebatch_recs_re_code` (`re_code`),
+  KEY `ix_prebatch_recs_plan_id` (`plan_id`),
+  KEY `ix_prebatch_recs_mat_sap_code` (`mat_sap_code`),
+  KEY `ix_prebatch_recs_prebatch_id` (`prebatch_id`),
+  KEY `ix_prebatch_recs_recode_batch_id` (`recode_batch_id`),
+  KEY `idx_prebatch_recs_packing_status` (`packing_status`),
+  CONSTRAINT `prebatch_recs_ibfk_1` FOREIGN KEY (`req_id`) REFERENCES `prebatch_reqs` (`id`)
+) ENGINE=InnoDB AUTO_INCREMENT=193 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;

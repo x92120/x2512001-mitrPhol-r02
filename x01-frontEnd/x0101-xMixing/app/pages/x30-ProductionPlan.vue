@@ -239,14 +239,14 @@ const columns = computed<QTableColumn[]>(() => [
 
 // Batch Columns
 const batchColumns = computed<QTableColumn[]>(() => [
-  { name: 'batch_id', label: 'Batch ID', field: 'batch_id', align: 'left', sortable: true },
-  { name: 'batch_size', label: 'Size', field: 'batch_size', align: 'right', sortable: true },
-  { name: 'flavour_house', label: 'FH', field: 'flavour_house', align: 'center' },
-  { name: 'spp', label: 'SPP', field: 'spp', align: 'center' },
-  { name: 'batch_prepare', label: 'ReCheck', field: 'batch_prepare', align: 'center' },
-  { name: 'ready_to_product', label: 'Ready', field: 'ready_to_product', align: 'center' },
-  { name: 'production', label: 'Prod', field: 'production', align: 'center' },
-  { name: 'done', label: 'Done', field: 'done', align: 'center' },
+  { name: 'batch_id', label: 'Batch ID', field: 'batch_id', align: 'left', sortable: true, style: 'width:9%' },
+  { name: 'batch_size', label: 'Size', field: 'batch_size', align: 'center', sortable: true, style: 'width:45px' },
+  { name: 'flavour_house', label: 'FH', field: 'flavour_house', align: 'center', style: 'width:36px' },
+  { name: 'spp', label: 'SPP', field: 'spp', align: 'center', style: 'width:36px' },
+  { name: 'batch_prepare', label: 'RC', field: 'batch_prepare', align: 'center', style: 'width:36px' },
+  { name: 'ready_to_product', label: 'Rdy', field: 'ready_to_product', align: 'center', style: 'width:36px' },
+  { name: 'production', label: 'Prd', field: 'production', align: 'center', style: 'width:36px' },
+  { name: 'done', label: 'Done', field: 'done', align: 'center', style: 'width:40px' },
 ])
 // Actions
 // Fetch SKUs
@@ -1318,16 +1318,16 @@ onMounted(() => {
                         <table v-show="!isWhCollapsed(props.row.plan_id, whGroup.wh)" style="width:100%; border-collapse:collapse; font-size:0.7rem; margin-bottom:2px; table-layout:fixed;"
                           :style="{ borderLeft:'3px solid ' + (whGroup.wh === 'MIX' ? '#7b1fa2' : whGroup.wh === 'FH' ? '#1565c0' : '#00897b') }">
                           <colgroup>
-                            <col style="width:22%">
-                            <col style="width:38%">
                             <col style="width:20%">
-                            <col style="width:20%">
+                            <col style="width:25%">
+                            <col style="width:25%">
+                            <col style="width:30%">
                           </colgroup>
-                          <thead><tr style="background:#f5f5f5;"><th style="padding:2px 4px; text-align:left;">RE Code</th><th style="padding:2px 4px; text-align:left;">Name</th><th style="padding:2px 4px; text-align:right;">Vol/Batch</th><th style="padding:2px 4px; text-align:right;">Total</th></tr></thead>
+                          <thead><tr style="background:#f5f5f5;"><th style="padding:2px 4px; text-align:left;">RE Code</th><th style="padding:2px 4px; text-align:left;">SAP Code</th><th style="padding:2px 4px; text-align:right;">Vol/Batch</th><th style="padding:2px 4px; text-align:right;">Total</th></tr></thead>
                           <tbody>
                             <tr v-for="ing in whGroup.items" :key="ing.re_code" style="border-bottom:1px solid #eee;">
                               <td style="padding:2px 4px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;" :style="{ color: whGroup.wh === 'MIX' ? '#7b1fa2' : whGroup.wh === 'FH' ? '#1565c0' : '#00897b' }">{{ ing.re_code }}</td>
-                              <td style="padding:2px 4px; color:#555; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ ing.name }}</td>
+                              <td style="padding:2px 4px; color:#777; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ ing.mat_sap_code }}</td>
                               <td style="padding:2px 4px; text-align:right; font-family:monospace;">{{ ing.vol_per_batch.toFixed(4) }}</td>
                               <td style="padding:2px 4px; text-align:right; font-weight:700; font-family:monospace;">{{ ing.total_vol.toFixed(4) }}</td>
                             </tr>
@@ -1358,9 +1358,10 @@ onMounted(() => {
                       <q-icon name="list_alt" size="xs" class="q-mr-xs" />Batch List ({{ (props.row.batches || []).length }})
                     </div>
                     <template v-if="props.row.batches && props.row.batches.length > 0">
-                      <q-table :rows="props.row.batches" :columns="batchColumns" row-key="batch_id" flat dense
-                        :pagination="{ rowsPerPage: 20 }" class="bg-white shadow-1"
-                        style="border-radius:6px; border:1px solid #e0e0e0; max-height:380px; overflow-y:auto;">
+                      <q-table :rows="props.row.batches" :columns="batchColumns" row-key="batch_id" flat dense hide-bottom
+                        :pagination="{ rowsPerPage: 0 }" class="bg-white shadow-1"
+                        style="border-radius:6px; border:1px solid #e0e0e0; max-height:350px; overflow-y:auto;"
+                        table-style="table-layout:fixed;">
                         <template v-slot:header="batchProps">
                           <q-tr :props="batchProps" class="bg-grey-2">
                             <q-th v-for="col in batchProps.cols" :key="col.name" :props="batchProps" class="text-weight-bold">{{ col.label }}</q-th>
@@ -1369,12 +1370,62 @@ onMounted(() => {
                         <template v-slot:body="batchProps">
                           <q-tr :props="batchProps" class="hover-bg">
                             <q-td v-for="col in batchProps.cols" :key="col.name" :props="batchProps">
-                              <template v-if="['flavour_house','spp','batch_prepare','ready_to_product','production','done'].includes(col.name)">
-                                <!-- Green = Packing/Production done (Ready, Prod, Done) -->
-                                <q-icon v-if="col.value && ['ready_to_product','production','done'].includes(col.name)" name="check_circle" color="positive" size="xs" />
-                                <!-- Yellow = Pre-batch Packing done (FH, SPP, ReCheck) -->
-                                <q-icon v-else-if="col.value && ['flavour_house','spp','batch_prepare'].includes(col.name)" name="check_circle" color="amber" size="xs" />
-                                <!-- Gray = Created / not done -->
+                              <!-- ═══ Status pipeline columns ═══ -->
+                              <template v-if="col.name === 'flavour_house'">
+                                <q-icon v-if="batchProps.row.fh_boxed_at" name="check_circle" color="blue" size="xs">
+                                  <q-tooltip>FH Box Closed ✅</q-tooltip>
+                                </q-icon>
+                                <q-icon v-else-if="batchProps.row.fh_packed > 0" name="pending" color="amber" size="xs">
+                                  <q-tooltip>FH Preparing {{ batchProps.row.fh_packed }}/{{ batchProps.row.fh_total }} packed</q-tooltip>
+                                </q-icon>
+                                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
+                              </template>
+                              <template v-else-if="col.name === 'spp'">
+                                <q-icon v-if="batchProps.row.spp_boxed_at" name="check_circle" color="light-blue" size="xs">
+                                  <q-tooltip>SPP Box Closed ✅</q-tooltip>
+                                </q-icon>
+                                <q-icon v-else-if="batchProps.row.spp_packed > 0" name="pending" color="amber" size="xs">
+                                  <q-tooltip>SPP Preparing {{ batchProps.row.spp_packed }}/{{ batchProps.row.spp_total }} packed</q-tooltip>
+                                </q-icon>
+                                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
+                              </template>
+                              <template v-else-if="col.name === 'batch_prepare'">
+                                <!-- ReCheck from real DB data — only valid if FH+SPP are done -->
+                                <template v-if="batchProps.row.recheck_total > 0 && batchProps.row.recheck_ok === batchProps.row.recheck_total && (batchProps.row.fh_boxed_at || batchProps.row.flavour_house) && (batchProps.row.spp_boxed_at || batchProps.row.spp)">
+                                  <q-icon name="verified" color="green" size="xs">
+                                    <q-tooltip>All {{ batchProps.row.recheck_ok }}/{{ batchProps.row.recheck_total }} checked ✅</q-tooltip>
+                                  </q-icon>
+                                </template>
+                                <template v-else-if="batchProps.row.recheck_ok > 0">
+                                  <q-icon name="pending" color="amber" size="xs">
+                                    <q-tooltip>{{ batchProps.row.recheck_ok }}/{{ batchProps.row.recheck_total }} checked</q-tooltip>
+                                  </q-icon>
+                                </template>
+                                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
+                              </template>
+                              <template v-else-if="col.name === 'ready_to_product'">
+                                <q-icon v-if="col.value" name="check_circle" color="teal" size="xs">
+                                  <q-tooltip>Ready to Production</q-tooltip>
+                                </q-icon>
+                                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
+                              </template>
+                              <template v-else-if="col.name === 'production'">
+                                <template v-if="batchProps.row.done">
+                                  <q-icon name="check_circle" color="green" size="xs">
+                                    <q-tooltip>Production Finished</q-tooltip>
+                                  </q-icon>
+                                </template>
+                                <template v-else-if="col.value">
+                                  <q-icon name="pending" color="amber-8" size="xs">
+                                    <q-tooltip>Production In Process</q-tooltip>
+                                  </q-icon>
+                                </template>
+                                <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
+                              </template>
+                              <template v-else-if="col.name === 'done'">
+                                <q-icon v-if="col.value" name="check_circle" color="green-8" size="xs">
+                                  <q-tooltip>All Done</q-tooltip>
+                                </q-icon>
                                 <q-icon v-else name="radio_button_unchecked" color="grey-4" size="xs" />
                               </template>
                               <template v-else-if="col.name === 'batch_id'">

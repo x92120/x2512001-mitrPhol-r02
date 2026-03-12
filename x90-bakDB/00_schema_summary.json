@@ -1,0 +1,132 @@
+{
+  "exported_at": "2026-03-11T18:36:33.011393",
+  "database": "cloudDB",
+  "host": "152.42.166.150",
+  "total_tables": 31,
+  "tables": {
+    "batches": {
+      "row_count": 2,
+      "column_count": 7
+    },
+    "ingredient_intake_from": {
+      "row_count": 3,
+      "column_count": 3
+    },
+    "ingredient_intake_history": {
+      "row_count": 80,
+      "column_count": 8
+    },
+    "ingredient_intake_lists": {
+      "row_count": 77,
+      "column_count": 27
+    },
+    "ingredients": {
+      "row_count": 136,
+      "column_count": 19
+    },
+    "intake_package_receive": {
+      "row_count": 597,
+      "column_count": 6
+    },
+    "package_container_sizes": {
+      "row_count": 9,
+      "column_count": 4
+    },
+    "package_container_types": {
+      "row_count": 5,
+      "column_count": 3
+    },
+    "package_containers": {
+      "row_count": 6,
+      "column_count": 5
+    },
+    "packing_records": {
+      "row_count": 0,
+      "column_count": 6
+    },
+    "plants": {
+      "row_count": 3,
+      "column_count": 8
+    },
+    "prebatch_item_from": {
+      "row_count": 149,
+      "column_count": 6
+    },
+    "prebatch_items": {
+      "row_count": 1344,
+      "column_count": 28
+    },
+    "prebatch_rec_from": {
+      "row_count": 92,
+      "column_count": 6
+    },
+    "prebatch_recs": {
+      "row_count": 75,
+      "column_count": 21
+    },
+    "prebatch_reqs": {
+      "row_count": 1194,
+      "column_count": 12
+    },
+    "production_batches": {
+      "row_count": 114,
+      "column_count": 21
+    },
+    "production_orders": {
+      "row_count": 3,
+      "column_count": 8
+    },
+    "production_plan_history": {
+      "row_count": 8,
+      "column_count": 8
+    },
+    "production_plans": {
+      "row_count": 8,
+      "column_count": 22
+    },
+    "products": {
+      "row_count": 2,
+      "column_count": 6
+    },
+    "sku_actions": {
+      "row_count": 11,
+      "column_count": 5
+    },
+    "sku_destinations": {
+      "row_count": 5,
+      "column_count": 3
+    },
+    "sku_groups": {
+      "row_count": 5,
+      "column_count": 7
+    },
+    "sku_histories": {
+      "row_count": 0,
+      "column_count": 8
+    },
+    "sku_masters": {
+      "row_count": 24,
+      "column_count": 11
+    },
+    "sku_phases": {
+      "row_count": 8,
+      "column_count": 5
+    },
+    "sku_steps": {
+      "row_count": 605,
+      "column_count": 38
+    },
+    "stock_adjustments": {
+      "row_count": 4,
+      "column_count": 13
+    },
+    "users": {
+      "row_count": 1,
+      "column_count": 12
+    },
+    "warehouses": {
+      "row_count": 3,
+      "column_count": 7
+    }
+  }
+}
