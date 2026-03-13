@@ -1584,14 +1584,15 @@ const processBagScan = async (rawScan: string) => {
   // 6) Process Packing
   if (bag) {
     if (isPacked(bag)) {
-      $q.notify({ type: 'info', message: t('packingList.alreadyPacked'), caption: bag.batch_record_id, position: 'top', timeout: 2000 })
+      playSound('wrong')
+      $q.notify({ type: 'warning', icon: 'error', message: 'This PreBatch already Boxed!', caption: bag.batch_record_id || bag.re_code, position: 'top', timeout: 3000 })
     } else {
       await onSimScanClick(bag) // Handles the frontend UI packing logic + notifying
     }
   } else if (item) {
     if (item.packing_status === 1) {
-      playSound('correct')
-      $q.notify({ type: 'info', message: 'Already packed', caption: item.batch_record_id, position: 'top', timeout: 2000 })
+      playSound('wrong')
+      $q.notify({ type: 'warning', icon: 'error', message: 'This PreBatch already Boxed!', caption: item.batch_record_id || item.re_code, position: 'top', timeout: 3000 })
     } else {
       playSound('correct')
       try {
