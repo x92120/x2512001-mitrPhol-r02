@@ -1022,6 +1022,23 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   if (!selectedBatch.value) return
   const batchId = selectedBatch.value.batch_id
 
+  // Check if this box is already closed (in transferred/delivered boxes)
+  const alreadyClosed = transferredBoxes.value.some(
+    (b: any) => b.batch_id === batchId && (b.wh === wh || b.wh === 'ALL')
+  )
+  if (alreadyClosed) {
+    playSound('correct')
+    $q.notify({
+      type: 'info',
+      icon: 'check_circle',
+      message: `📦 ${wh} Box already closed for ${batchId}`,
+      caption: 'No need to re-close and print.',
+      position: 'top',
+      timeout: 3000,
+    })
+    return
+  }
+
   // Get all items for this WH: prebatch_recs (per-package) + prebatch_items fallback
   const whMatcher = (r: any) => wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
   const recs = batchRecords.value.filter(whMatcher)
@@ -1949,7 +1966,7 @@ onMounted(async () => {
                 <div class="text-subtitle2 text-weight-bold">PreBatch Packing</div>
               </div>
               <q-badge v-if="selectedBatch" color="white" text-color="blue-7" class="text-weight-bold">
-                {{ (selectedBatch.reqs || []).filter((r: any) => isReqPackingOk(r)).length }}/{{ (selectedBatch.reqs || []).length }}
+                {{ (selectedBatch.reqs || []).filter((r: any) => (filterMiddleWh === 'FH' ? isFH(r.wh || '') : filterMiddleWh === 'SPP' ? isSPP(r.wh || '') : true) && isReqPackingOk(r)).length }}/{{ (selectedBatch.reqs || []).filter((r: any) => filterMiddleWh === 'FH' ? isFH(r.wh || '') : filterMiddleWh === 'SPP' ? isSPP(r.wh || '') : true).length }}
               </q-badge>
             </div>
           </q-card-section>
@@ -1964,7 +1981,7 @@ onMounted(async () => {
               <template v-else>
                 <!-- FH Section -->
                 <q-expansion-item
-                  v-if="(selectedBatch.reqs || []).filter((r: any) => isFH(r.wh || '')).length > 0"
+                  v-if="filterMiddleWh === 'FH' && (selectedBatch.reqs || []).filter((r: any) => isFH(r.wh || '')).length > 0"
                   dense expand-separator default-opened
                   header-class="bg-blue-1"
                 >
@@ -2015,7 +2032,7 @@ onMounted(async () => {
 
                 <!-- SPP Section -->
                 <q-expansion-item
-                  v-if="(selectedBatch.reqs || []).filter((r: any) => isSPP(r.wh || '')).length > 0"
+                  v-if="filterMiddleWh === 'SPP' && (selectedBatch.reqs || []).filter((r: any) => isSPP(r.wh || '')).length > 0"
                   dense expand-separator default-opened
                   header-class="bg-light-blue-1"
                 >
