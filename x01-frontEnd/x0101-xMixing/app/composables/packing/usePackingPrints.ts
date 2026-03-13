@@ -116,13 +116,13 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
         type BagGroup = { id: string; req_vol: number; bags: any[]; is_recode: boolean }
         const grouped: BagGroup[] = []
         const seenIds = new Map<string, BagGroup>()
-        
+
         for (const bag of bags) {
             const id = bag.prebatch_id || bag.batch_record_id || bag.re_code || '?'
             if (!seenIds.has(id)) {
-                const g: BagGroup = { 
-                    id: id, 
-                    req_vol: bag.total_request_volume ?? bag.total_volume ?? 0, 
+                const g: BagGroup = {
+                    id: id,
+                    req_vol: bag.total_request_volume ?? bag.total_volume ?? 0,
                     bags: [],
                     is_recode: !bag.prebatch_id && !bag.batch_record_id
                 }
@@ -134,30 +134,30 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
         grouped.forEach(g => g.bags.sort((a: any, b: any) => (a.package_no ?? 0) - (b.package_no ?? 0)))
 
         const HDR_H = 16, PKG_H = 12, START_Y = 80, MAX_Y = 200
-        
+
         let pages: string[] = []
         let curY = START_Y
         let currentRowsSvg = ''
-        
+
         const pushPageAndReset = () => {
             pages.push(currentRowsSvg)
             currentRowsSvg = ''
             curY = START_Y
         }
-        
+
         for (const grp of grouped) {
             // Check if header alone exceeds height
             if (curY + HDR_H > MAX_Y) {
                 pushPageAndReset()
             }
-            
+
             const title = grp.is_recode ? grp.id : grp.id
             currentRowsSvg += `
         <rect x="10" y="${curY}" width="370" height="${HDR_H}" fill="#f0f0f0"/>
         <text x="14" y="${curY + 11}" style="font-size:10px;font-family:Arial,sans-serif;font-weight:bold;fill:#000000">${title}</text>
       `
             curY += HDR_H
-            
+
             for (const bag of grp.bags) {
                 if (curY + PKG_H > MAX_Y) {
                     pushPageAndReset()
@@ -168,7 +168,7 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
       `
                     curY += HDR_H
                 }
-                
+
                 const pkgLabel = `Pack ${bag.package_no ?? 1}/${bag.total_packages ?? 1} Volume`
                 currentRowsSvg += `
           <rect x="10" y="${curY}" width="370" height="${PKG_H}" fill="#ffffff"/>
@@ -179,7 +179,7 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
                 curY += PKG_H
             }
         }
-        
+
         if (currentRowsSvg !== '') {
             pages.push(currentRowsSvg)
         }
@@ -191,14 +191,14 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
         try {
             const resp = await fetch('/labels/packingbox-label_4x3.svg')
             const templateSvg = await resp.text()
-            
+
             let finalHtmlContent = ''
             const totalPages = pages.length
-            
-            for(let i = 0; i < totalPages; i++) {
+
+            for (let i = 0; i < totalPages; i++) {
                 const boxNum = i + 1
                 const boxIdVal = `${batchId}-${wh}-${boxNum}/${totalPages}`
-                
+
                 let pageSvg = templateSvg
                     .replaceAll('{{Warehouse}}', wh)
                     .replaceAll('{{PrintDate}}', printDate)
@@ -211,7 +211,7 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
                 const qrData = boxIdVal
                 const qrDataUrl = await QRCode.toDataURL(qrData, { width: 72, margin: 1, color: { dark: '#000000', light: '#ffffff' } })
                 pageSvg = pageSvg.replace('{{BoxQRCode}}', `<image x="0" y="0" width="72" height="72" href="${qrDataUrl}" />`)
-                
+
                 finalHtmlContent += pageSvg
             }
 
@@ -290,17 +290,17 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
 
         const plan = deps.plans.value.find((p: any) => p.batches?.some((b: any) => b.batch_id === deps.selectedBatch.value.batch_id))
 
-        // Use currentBoxScans (clicked/scanned items) as the primary data source
+        // Use selectedBatch.reqs (prebatch items with packing status) as primary data source
         const isFH = (w: string) => w?.toUpperCase().includes('FH') || w?.toUpperCase().includes('FLAVOUR')
         const isSPP = (w: string) => w?.toUpperCase().includes('SPP')
-        const scannedItems = deps.currentBoxScans.value.filter((item: any) => {
-            const itemWh = item.wh || ''
-            return wh === 'FH' ? isFH(itemWh) : isSPP(itemWh)
+        const whReqs = ((deps.selectedBatch.value.reqs || []) as any[]).filter((r: any) => {
+            const rWh = r.wh || ''
+            return wh === 'FH' ? isFH(rWh) : isSPP(rWh)
         })
 
-        // Fallback to bagsByWarehouse if no scanned items
-        const items = scannedItems.length > 0
-            ? scannedItems
+        // Use all reqs for this WH (both boxed and waiting) — the label shows the full packing list
+        const items = whReqs.length > 0
+            ? whReqs
             : (wh === 'FH' ? deps.bagsByWarehouse.value.FH : deps.bagsByWarehouse.value.SPP)
 
         // Build rows: each item = one row showing preBatch ID, re_code, volume
