@@ -901,7 +901,7 @@ onMounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="c in recheckFH" :key="c.req_id"
+                <tr v-for="(c, idx) in recheckFH" :key="(c.rec_id || c.req_id) + '-' + idx"
                   :class="{ 'bg-green-1': c.recheck_status === 1, 'bg-red-1': c.recheck_status === 2 }">
                   <td class="text-center">
                     <q-icon :name="c.recheck_status === 1 ? 'check_circle' : (c.recheck_status === 2 ? 'error' : 'radio_button_unchecked')"
@@ -911,7 +911,7 @@ onMounted(() => {
                   <td style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.ingredient_name || '-' }}</td>
                   <td class="text-right">{{ (c.required_volume || 0).toFixed(3) }}</td>
                   <td class="text-right">{{ (c.packed_volume || 0).toFixed(3) }}</td>
-                  <td>{{ c.packed_count || 0 }}/{{ c.total_packages || '?' }}</td>
+                  <td>{{ c.package_no || '-' }}/{{ c.total_packages || '-' }}</td>
                 </tr>
               </tbody>
             </q-markup-table>
@@ -943,7 +943,7 @@ onMounted(() => {
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="c in recheckSPP" :key="c.req_id"
+                <tr v-for="(c, idx) in recheckSPP" :key="(c.rec_id || c.req_id) + '-' + idx"
                   :class="{ 'bg-green-1': c.recheck_status === 1, 'bg-red-1': c.recheck_status === 2 }">
                   <td class="text-center">
                     <q-icon :name="c.recheck_status === 1 ? 'check_circle' : (c.recheck_status === 2 ? 'error' : 'radio_button_unchecked')"
@@ -953,7 +953,7 @@ onMounted(() => {
                   <td style="max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">{{ c.ingredient_name || '-' }}</td>
                   <td class="text-right">{{ (c.required_volume || 0).toFixed(3) }}</td>
                   <td class="text-right">{{ (c.packed_volume || 0).toFixed(3) }}</td>
-                  <td>{{ c.packed_count || 0 }}/{{ c.total_packages || '?' }}</td>
+                  <td>{{ c.package_no || '-' }}/{{ c.total_packages || '-' }}</td>
                 </tr>
               </tbody>
             </q-markup-table>

@@ -1166,42 +1166,56 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     ).all()
 
     # 4. Build checklist from requirements, enriched with packed record data
+    #    Per-package expansion: if a req has N packed records, show N rows.
+    #    If a req has 0 packed records, show 1 row (from the requirement).
     checklist = []
-    all_box_ids = set()
+    all_prebatch_ids = set()
 
     for req in reqs:
-        # Find matching packed records for this requirement
         matching_recs = [r for r in recs if r.req_id == req.id]
-        packed_count = len(matching_recs)
-        packed_volume = sum(r.net_volume or 0 for r in matching_recs)
-        total_packages = matching_recs[0].total_packages if matching_recs else 0
 
-        # Collect box IDs
+        # Collect prebatch IDs
         for r in matching_recs:
-            if r.box_id:
-                all_box_ids.add(r.box_id)
+            if r.prebatch_id:
+                all_prebatch_ids.add(r.prebatch_id)
 
-        # Determine recheck status from recs
-        all_checked = packed_count > 0 and all(r.recheck_status == 1 for r in matching_recs)
-        any_error = any(r.recheck_status == 2 for r in matching_recs)
-        recheck_status = 1 if all_checked else (2 if any_error else 0)
-
-        # Batch record IDs for this requirement (for scanning verification)
-        rec_ids = [r.batch_record_id for r in matching_recs]
-
-        checklist.append({
-            "req_id": req.id,
-            "re_code": req.re_code,
-            "ingredient_name": req.ingredient_name,
-            "wh": req.wh or "FH",
-            "required_volume": req.required_volume or 0,
-            "packed_volume": round(packed_volume, 3),
-            "packed_count": packed_count,
-            "total_packages": total_packages,
-            "recheck_status": recheck_status,
-            "batch_record_ids": rec_ids,
-            "status": req.status,  # 0=Pending, 1=In-Progress, 2=Completed
-        })
+        if matching_recs:
+            # One row per packed package
+            for r in matching_recs:
+                checklist.append({
+                    "req_id": req.id,
+                    "rec_id": r.id,
+                    "re_code": req.re_code,
+                    "ingredient_name": req.ingredient_name,
+                    "wh": req.wh or "FH",
+                    "required_volume": req.required_volume or 0,
+                    "packed_volume": r.net_volume or 0,
+                    "package_no": r.package_no,
+                    "total_packages": r.total_packages,
+                    "batch_record_id": r.batch_record_id,
+                    "recheck_status": r.recheck_status,
+                    "recheck_at": r.recheck_at.isoformat() if r.recheck_at else None,
+                    "recheck_by": r.recheck_by,
+                    "status": req.status,
+                })
+        else:
+            # No packed records yet — show requirement only
+            checklist.append({
+                "req_id": req.id,
+                "rec_id": None,
+                "re_code": req.re_code,
+                "ingredient_name": req.ingredient_name,
+                "wh": req.wh or "FH",
+                "required_volume": req.required_volume or 0,
+                "packed_volume": 0,
+                "package_no": None,
+                "total_packages": None,
+                "batch_record_id": None,
+                "recheck_status": 0,
+                "recheck_at": None,
+                "recheck_by": None,
+                "status": req.status,
+            })
 
     # 5. Summary
     total = len(checklist)
@@ -1215,7 +1229,7 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
         "sku_id": sku_id,
         "sku_name": plan.sku_name if plan else "Unknown",
         "plant": batch.plant,
-        "box_ids": sorted(all_box_ids),
+        "box_ids": sorted(all_prebatch_ids),
         "fh_boxed_at": batch.fh_boxed_at.isoformat() if batch.fh_boxed_at else None,
         "spp_boxed_at": batch.spp_boxed_at.isoformat() if batch.spp_boxed_at else None,
         "checklist": checklist,
