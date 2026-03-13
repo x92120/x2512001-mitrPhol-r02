@@ -56,16 +56,21 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
 
     // ── Helper: open 4x3 print window ──
     const open4x3PrintWindow = (title: string, svgContent: string) => {
-        const pw = Math.round(window.screen.width * 0.8)
-        const ph = Math.round(window.screen.height * 0.8)
-        const left = Math.round((window.screen.width - pw) / 2)
-        const top = Math.round((window.screen.height - ph) / 2)
-        const win = window.open('', '_blank', `width=${pw},height=${ph},left=${left},top=${top}`)
-        if (!win) {
-            deps.$q.notify({ type: 'warning', message: 'Popup blocked — allow popups and retry', position: 'top' })
+        // Use hidden iframe to print without opening a new window
+        let iframe = document.getElementById('__print_iframe') as HTMLIFrameElement
+        if (iframe) iframe.remove()
+        iframe = document.createElement('iframe')
+        iframe.id = '__print_iframe'
+        iframe.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:0;height:0;border:none;'
+        document.body.appendChild(iframe)
+
+        const doc = iframe.contentDocument || iframe.contentWindow?.document
+        if (!doc) {
+            deps.$q.notify({ type: 'warning', message: 'Print failed — cannot access iframe', position: 'top' })
             return null
         }
-        win.document.write(`<!DOCTYPE html><html><head>
+        doc.open()
+        doc.write(`<!DOCTYPE html><html><head>
       <title>${title}</title>
       <style>
         @page { size: 4in 3in; margin: 0; }
@@ -76,17 +81,20 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
             body { display: block; }
         }
       </style>
-    </head><body>
-      ${svgContent}
-      <script>
+    </head><body>${svgContent}</body></html>`)
+        doc.close()
+
+        // Wait for content to render, then print
         setTimeout(() => {
-            window.print();
-            window.onafterprint = () => window.close();
-        }, 500);
-      <\/script>
-    </body></html>`)
-        win.document.close()
-        return win
+            iframe.contentWindow?.print()
+            // Refocus scan input after print dialog closes
+            setTimeout(() => {
+                const scanInput = document.querySelector('input[placeholder*="Scan"]') as HTMLInputElement
+                if (scanInput) scanInput.focus()
+                iframe.remove()
+            }, 500)
+        }, 300)
+        return iframe
     }
 
     // ── Helper: generate report number ──
