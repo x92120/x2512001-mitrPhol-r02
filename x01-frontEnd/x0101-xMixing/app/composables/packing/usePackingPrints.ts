@@ -294,7 +294,7 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
     // ═══════════════════════════════════════════════════════════════════
     // 3. BOX PACKING LABEL (4×3 inch)
     // ═══════════════════════════════════════════════════════════════════
-    const printBoxLabel = async (wh: 'FH' | 'SPP') => {
+    const printBoxLabel = async (wh: 'FH' | 'SPP', boxNum?: number, isLastBox?: boolean) => {
         if (!deps.selectedBatch.value || !deps.batchInfo.value) return
 
         const plan = deps.plans.value.find((p: any) => p.batches?.some((b: any) => b.batch_id === deps.selectedBatch.value.batch_id))
@@ -372,10 +372,16 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
             const totalPages = pages.length
 
             for (let i = 0; i < totalPages; i++) {
-                const boxNum = i + 1
-                const boxIdVal = totalPages > 1
-                    ? `${deps.selectedBatch.value.batch_id}-${wh}-${boxNum}/${totalPages}`
+                const pageNum = i + 1
+                let boxIdVal = totalPages > 1
+                    ? `${deps.selectedBatch.value.batch_id}-${wh}-${pageNum}/${totalPages}`
                     : `${deps.selectedBatch.value.batch_id}-${wh}`
+
+                // Add box number caption for multibox
+                if (boxNum && boxNum > 0) {
+                    boxIdVal += ` > Box ${boxNum}`
+                    if (isLastBox) boxIdVal += ' Last Box'
+                }
 
                 let pageSvg = templateSvg
                     .replaceAll('{{Warehouse}}', wh)

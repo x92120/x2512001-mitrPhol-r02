@@ -1080,8 +1080,8 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
         timeout: 3000,
       })
       
-      // Auto-trigger the print box label function
-      await printBoxLabel(wh)
+      // Auto-trigger the print box label function with box number
+      await printBoxLabel(wh, nextBoxNum, allBoxed)
       
       // Refresh data
       await fetchBatchRecords(batchId)
