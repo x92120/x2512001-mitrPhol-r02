@@ -1026,10 +1026,18 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   const alreadyClosed = transferredBoxes.value.some(
     (b: any) => b.batch_id === batchId && (b.wh === wh || b.wh === 'ALL')
   )
-  // Count how many boxes already exist for this batch+wh (not other WH)
-  const existingBoxCount = transferredBoxes.value.filter(
-    (b: any) => b.batch_id === batchId && (wh === 'FH' ? isFH(b.wh || '') : isSPP(b.wh || ''))
-  ).length
+  if (alreadyClosed) {
+    playSound('wrong')
+    $q.notify({
+      type: 'warning',
+      icon: 'error',
+      message: `${wh} Box already closed for ${batchId}`,
+      caption: 'Cannot close again. Only one box per batch.',
+      position: 'top',
+      timeout: 3000,
+    })
+    return
+  }
 
   // Get all items for this WH: prebatch_recs (per-package) + prebatch_items fallback
   const whMatcher = (r: any) => wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
@@ -1049,14 +1057,12 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   }
 
   const allBoxed = waitReqs.length === 0
-  const nextBoxNum = existingBoxCount + 1
-  const boxLabel = alreadyClosed ? ` Box #${nextBoxNum}` : ''
   const statusMsg = allBoxed
-    ? `All ${boxedReqs.length} items are boxed. Seal${boxLabel} and print label?`
-    : `${boxedReqs.length}/${whReqs.length} items boxed (${waitReqs.length} still waiting). Seal${boxLabel} anyway?`
+    ? `All ${boxedReqs.length} items are boxed. Seal and print label?`
+    : `${boxedReqs.length}/${whReqs.length} items boxed (${waitReqs.length} still waiting). Seal anyway?`
 
   $q.dialog({
-    title: `Close ${wh} Packing${boxLabel}`,
+    title: `Close ${wh} Packing Box`,
     message: statusMsg,
     cancel: true,
     persistent: true,
@@ -1080,8 +1086,8 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
         timeout: 3000,
       })
       
-      // Auto-trigger the print box label function with box number
-      await printBoxLabel(wh, nextBoxNum, allBoxed)
+      // Auto-trigger the print box label function
+      await printBoxLabel(wh)
       
       // Refresh data
       await fetchBatchRecords(batchId)
