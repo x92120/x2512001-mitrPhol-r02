@@ -1589,13 +1589,19 @@ watch(lastScan, async (scan) => {
 })
 
 // Auto-popup Close Box when all prebatch items for current WH are boxed
+let _closeBoxTriggered = false
 watch(allCurrentWhBoxed, (allBoxed) => {
-  if (!allBoxed || !selectedBatch.value) return
+  if (!allBoxed || !selectedBatch.value) {
+    _closeBoxTriggered = false  // reset when condition changes
+    return
+  }
+  if (_closeBoxTriggered) return  // prevent double trigger
+  _closeBoxTriggered = true
   const wh = filterMiddleWh.value === 'ALL' ? 'FH' : filterMiddleWh.value
   playSound('correct')
   // Auto-trigger Close Box dialog after a short delay
   setTimeout(() => onCloseBox(wh as 'FH' | 'SPP'), 600)
-})
+}, { immediate: true })
 
 // ═══════════════════════════════════════════════════════════════════
 // LIFECYCLE
