@@ -54,7 +54,7 @@ DB_CONFIGS = {
 }
 
 # Active database state (default to remoteDB)
-_active_db_key = os.getenv("ACTIVE_DB", "cloudDB")
+_active_db_key = os.getenv("ACTIVE_DB", "remoteDB")
 
 
 def _build_url(host: str) -> str:

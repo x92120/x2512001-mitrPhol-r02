@@ -918,6 +918,64 @@ const deliveryBySku = computed((): DeliverySkuGroup[] => {
   return result
 })
 
+// ── Paused Boxes storage (in-memory) ──
+const pausedBoxes = ref<any[]>([])
+
+/** Pause current box — save state and clear UI for a new box */
+const onPauseBox = () => {
+  if (!selectedBatch.value) return
+  const batchId = selectedBatch.value.batch_id
+  const wh = filterMiddleWh.value === 'ALL' ? 'FH' : filterMiddleWh.value
+
+  // Save current box state
+  const existingIdx = pausedBoxes.value.findIndex(p => p.batch_id === batchId && p.wh === wh)
+  const pausedData = {
+    batch_id: batchId,
+    wh,
+    scans: [...currentBoxScans.value],
+    pausedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+  }
+  if (existingIdx >= 0) {
+    pausedBoxes.value[existingIdx] = pausedData
+  } else {
+    pausedBoxes.value.push(pausedData)
+  }
+
+  playSound('correct')
+  $q.notify({
+    type: 'info',
+    icon: 'pause_circle',
+    message: `Box paused: ${batchId} [${wh}]`,
+    caption: `${currentBoxScans.value.length} items saved. Scan a new batch to start a new box.`,
+    position: 'top',
+    timeout: 3000,
+  })
+
+  // Clear UI for new box
+  currentBoxScans.value = []
+  selectedBatch.value = null
+  scanBatchId.value = ''
+  batchRecords.value = []
+  scanFH.value = ''
+  scanSPP.value = ''
+}
+
+/** Resume a paused box */
+const onResumeBox = async (pausedBox: any) => {
+  scanBatchId.value = pausedBox.batch_id
+  await onScanBatchEnter()
+  currentBoxScans.value = pausedBox.scans || []
+  filterMiddleWh.value = pausedBox.wh || 'FH'
+  // Remove from paused list
+  pausedBoxes.value = pausedBoxes.value.filter(p => !(p.batch_id === pausedBox.batch_id && p.wh === pausedBox.wh))
+  $q.notify({
+    type: 'positive',
+    icon: 'play_circle',
+    message: `Resumed box: ${pausedBox.batch_id} [${pausedBox.wh}]`,
+    position: 'top',
+    timeout: 2000,
+  })
+}
 
 const onCloseBox = (wh: 'FH' | 'SPP') => {
   if (!selectedBatch.value) return
@@ -1971,7 +2029,16 @@ onMounted(async () => {
                   {{ filteredBoxScans.length }} items
                 </q-badge>
                 <q-btn
-                  unelevated size="sm" icon="check_box" label="Close Box & Print"
+                  unelevated size="sm" icon="pause_circle" label="Pause"
+                  color="orange-7"
+                  :disable="!selectedBatch"
+                  @click="onPauseBox()"
+                  class="q-mr-xs"
+                >
+                  <q-tooltip>Pause this box and open a new one</q-tooltip>
+                </q-btn>
+                <q-btn
+                  unelevated size="sm" icon="check_box" label="Close & Print"
                   :color="filteredBoxScans.length > 0 ? 'green-5' : 'grey-5'"
                   :disable="filteredBoxScans.length === 0"
                   @click="onCloseBox(filterMiddleWh === 'ALL' ? 'FH' : filterMiddleWh)"
@@ -1981,8 +2048,26 @@ onMounted(async () => {
               </div>
             </div>
           </q-card-section>
+
+          <!-- Paused Boxes Banner -->
+          <div v-if="pausedBoxes.length > 0" class="q-px-sm q-py-xs" style="background: #fff3e0;">
+            <div class="row items-center q-gutter-xs" style="flex-wrap: wrap;">
+              <q-icon name="pause_circle" color="orange-8" size="xs" />
+              <span class="text-caption text-weight-bold text-orange-9">Paused:</span>
+              <q-btn
+                v-for="pb in pausedBoxes" :key="`${pb.batch_id}-${pb.wh}`"
+                dense unelevated size="xs"
+                color="orange-7" text-color="white"
+                :label="`${pb.batch_id} [${pb.wh}] (${pb.scans.length})`"
+                icon="play_circle"
+                class="q-mr-xs"
+                @click="onResumeBox(pb)"
+              >
+                <q-tooltip>Resume this box ({{ pb.scans.length }} items, paused at {{ pb.pausedAt }})</q-tooltip>
+              </q-btn>
+            </div>
+          </div>
           
-          <!-- Compact Batch Scanner + Info -->
           <q-card-section class="q-py-xs q-px-sm">
             <div
               v-if="selectedBatch"
