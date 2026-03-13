@@ -1415,16 +1415,36 @@ const processBagScan = async (rawScan: string) => {
   let scannedReCode = ''
 
   // 1a) Parse NEW JSON QR format:
-  //    {"b":"P260311-02-02-002","m":"1234567890","p":"1/2","n":5.398,"t":10.71}
+  //    {"b":"P260311-02-02-002","m":"1200000041000029","p":"1/2","n":5.398,"t":10.71}
+  //    m = mat_sap_code (SAP material code), not re_code
   if (rawScan.trim().startsWith('{')) {
     try {
       const qr = JSON.parse(rawScan.trim())
       if (qr.b) {
         inferredBatchId = qr.b
-        // Look up re_code from mat_sap_code
+        // Look up re_code from mat_sap_code (m field)
         if (qr.m) {
-          const matchedIng = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP].find((i: any) => i.mat_sap_code === qr.m)
-          if (matchedIng) scannedReCode = matchedIng.re_code
+          // 1. Try bagsByWarehouse (prebatch_recs)
+          const allBagsSearch = [...bagsByWarehouse.value.FH, ...bagsByWarehouse.value.SPP]
+          let matchedIng = allBagsSearch.find((i: any) => i.mat_sap_code === qr.m)
+          
+          // 2. Try ingredients API lookup for SAP code → re_code
+          if (!matchedIng) {
+            try {
+              const ings = await $fetch<any[]>(`${appConfig.apiBaseUrl}/ingredients/?limit=200`, {
+                headers: getAuthHeader() as Record<string, string>,
+              })
+              const ingMatch = ings?.find((i: any) => String(i.mat_sap_code) === String(qr.m))
+              if (ingMatch) {
+                scannedReCode = ingMatch.re_code
+                console.log(`[JSON QR] mat_sap_code ${qr.m} → re_code ${scannedReCode} (via ingredients)`)
+              }
+            } catch (e) {
+              console.error('Failed to lookup ingredients for SAP code:', e)
+            }
+          } else {
+            scannedReCode = matchedIng.re_code
+          }
         }
         barcode = `${qr.b}-${scannedReCode || qr.m}`
       }
