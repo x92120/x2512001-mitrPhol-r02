@@ -857,6 +857,31 @@ const filteredBoxScans = computed(() => {
   return currentBoxScans.value.filter(bag => bag.wh === filterMiddleWh.value)
 })
 
+/** Group selectedBatch.reqs by re_code for the current WH, showing all prebatch items with Wait/Boxed status */
+interface BoxReqGroup { re_code: string; items: any[] }
+const boxReqsGrouped = computed((): BoxReqGroup[] => {
+  if (!selectedBatch.value?.reqs) return []
+  const wh = filterMiddleWh.value
+  const reqs = (selectedBatch.value.reqs as any[]).filter((r: any) => {
+    if (wh === 'ALL') return true
+    if (wh === 'FH') return isFH(r.wh || '')
+    if (wh === 'SPP') return isSPP(r.wh || '')
+    return r.wh === wh
+  })
+  const map = new Map<string, BoxReqGroup>()
+  for (const r of reqs) {
+    const code = r.re_code || '?'
+    if (!map.has(code)) map.set(code, { re_code: code, items: [] })
+    map.get(code)!.items.push(r)
+  }
+  return Array.from(map.values())
+})
+
+/** Count boxed vs total for current WH */
+const boxReqsTotal = computed(() => boxReqsGrouped.value.reduce((s, g) => s + g.items.length, 0))
+const boxReqsBoxed = computed(() => boxReqsGrouped.value.reduce((s, g) => s + g.items.filter(i => i.packing_status === 1).length, 0))
+const allCurrentWhBoxed = computed(() => boxReqsTotal.value > 0 && boxReqsBoxed.value >= boxReqsTotal.value)
+
 const filteredTransferredBoxes = computed(() => {
   return transferredBoxes.value.filter(b => b.wh === filterMiddleWh.value)
 })
@@ -1563,29 +1588,13 @@ watch(lastScan, async (scan) => {
   await processBagScan(scan.barcode.trim())
 })
 
-// Auto-close box when all prebatch items for a warehouse are packed
-watch([allFhPacked, allSppPacked], async ([fhDone, sppDone]) => {
-  if (!selectedBatch.value) return
-
+// Auto-popup Close Box when all prebatch items for current WH are boxed
+watch(allCurrentWhBoxed, (allBoxed) => {
+  if (!allBoxed || !selectedBatch.value) return
   const wh = filterMiddleWh.value === 'ALL' ? 'FH' : filterMiddleWh.value
-  const isCurrentWhDone = wh === 'FH' ? fhDone : sppDone
-  const hasItems = wh === 'FH'
-    ? bagsByWarehouse.value.FH.length > 0
-    : bagsByWarehouse.value.SPP.length > 0
-
-  if (isCurrentWhDone && hasItems) {
-    // All prebatch items for current WH are packed — auto trigger close box
-    playSound('correct')
-    $q.notify({
-      type: 'positive',
-      icon: 'check_circle',
-      message: `✅ All ${wh} items packed! Close the box.`,
-      position: 'top',
-      timeout: 2000,
-    })
-    // Trigger close box (with dialog prompt for seal & print)
-    setTimeout(() => onCloseBox(wh as 'FH' | 'SPP'), 500)
-  }
+  playSound('correct')
+  // Auto-trigger Close Box dialog after a short delay
+  setTimeout(() => onCloseBox(wh as 'FH' | 'SPP'), 600)
 })
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2017,7 +2026,7 @@ onMounted(async () => {
               </div>
               <div class="row items-center q-gutter-sm">
                 <q-badge color="white" text-color="indigo-9" class="text-weight-bold">
-                  {{ filteredBoxScans.length }} items
+                  {{ boxReqsBoxed }}/{{ boxReqsTotal }} items
                 </q-badge>
                 <q-btn
                   unelevated size="sm" icon="pause_circle" label="Pause"
@@ -2089,24 +2098,64 @@ onMounted(async () => {
             </div>
           </q-card-section>
 
-          <!-- Current Box Items (compact, scrollable) -->
-          <div v-if="filteredBoxScans.length > 0" style="max-height:300px; overflow-y:auto; background:#f5f7fa;">
-            <q-list dense separator class="bg-white" style="border-radius:0;">
-              <q-item v-for="(bag, idx) in filteredBoxScans" :key="idx" dense style="min-height:28px">
-                <q-item-section avatar style="min-width:20px">
-                   <q-icon name="check_circle" size="xs" color="green-6" />
-                </q-item-section>
-                <q-item-section>
-                   <q-item-label style="font-size:0.7rem" class="text-weight-bold">{{ bag.re_code }}</q-item-label>
-                   <q-item-label caption style="font-size:0.58rem;font-family:monospace;color:#666;">{{ bag.batch_record_id || bag.prebatch_id || '' }}</q-item-label>
-                </q-item-section>
-                <q-item-section side>
-                   <span style="font-size:0.65rem" class="text-weight-bold text-green-8">
-                     {{ bag.net_volume?.toFixed(3) || bag.total_request_volume?.toFixed(3) || bag.required_volume?.toFixed(3) }} kg
-                   </span>
-                </q-item-section>
-              </q-item>
+          <!-- Current Box Items: grouped by ReCode → PreBatchID with Wait/Boxed status -->
+          <div v-if="boxReqsGrouped.length > 0" style="max-height:300px; overflow-y:auto; background:#f5f7fa;">
+            <q-list dense class="bg-white" style="border-radius:0;">
+              <template v-for="grp in boxReqsGrouped" :key="grp.re_code">
+                <!-- ReCode header -->
+                <q-item dense style="min-height:22px; background:#e8eaf6;">
+                  <q-item-section avatar style="min-width:18px">
+                    <q-icon name="science" size="14px" color="indigo-5" />
+                  </q-item-section>
+                  <q-item-section>
+                    <q-item-label class="text-weight-bold text-indigo-8" style="font-size:0.72rem">
+                      {{ grp.re_code }}
+                    </q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-badge
+                      :color="grp.items.every(i => i.packing_status === 1) ? 'green-6' : 'orange-6'"
+                      style="font-size:0.55rem"
+                    >
+                      {{ grp.items.filter(i => i.packing_status === 1).length }}/{{ grp.items.length }}
+                    </q-badge>
+                  </q-item-section>
+                </q-item>
+                <!-- PreBatchID rows -->
+                <q-item
+                  v-for="item in grp.items" :key="item.id"
+                  dense style="min-height:24px; padding-left:28px;"
+                  :class="item.packing_status === 1 ? 'bg-green-1' : 'bg-white'"
+                >
+                  <q-item-section avatar style="min-width:16px">
+                    <q-icon
+                      :name="item.packing_status === 1 ? 'check_circle' : 'hourglass_empty'"
+                      :color="item.packing_status === 1 ? 'green-6' : 'orange-5'"
+                      size="14px"
+                    />
+                  </q-item-section>
+                  <q-item-section>
+                    <q-item-label style="font-size:0.62rem; font-family:monospace;">
+                      {{ item.batch_record_id || item.prebatch_id || '-' }}
+                    </q-item-label>
+                  </q-item-section>
+                  <q-item-section side>
+                    <q-badge
+                      :color="item.packing_status === 1 ? 'green-6' : 'orange-5'"
+                      :text-color="'white'"
+                      style="font-size:0.5rem; min-width:38px; text-align:center;"
+                    >
+                      {{ item.packing_status === 1 ? 'Boxed' : 'Wait' }}
+                    </q-badge>
+                  </q-item-section>
+                </q-item>
+              </template>
             </q-list>
+          </div>
+          <!-- All boxed banner -->
+          <div v-if="allCurrentWhBoxed && selectedBatch" class="q-pa-xs text-center" style="background:#e8f5e9;">
+            <q-icon name="check_circle" color="green-8" size="xs" />
+            <span class="text-caption text-weight-bold text-green-8"> All items boxed! Ready to close.</span>
           </div>
         </q-card>
 
