@@ -1310,10 +1310,14 @@ const onSimScanClick = async (bag: any) => {
     return
   }
 
-  // Check if this bag belongs to the selected batch via req_id
+  // Check if this bag belongs to the selected batch
   const batchReqs = selectedBatch.value.reqs || []
-  const reqIds = new Set(batchReqs.map((r: any) => r.id))
-  const belongsToBox = reqIds.has(bag.req_id)
+  const batchId = selectedBatch.value.batch_id
+  const belongsToBox = 
+    // Match by batch_record_id prefix (e.g. P260311-02-02-001-FV044A-1 starts with P260311-02-02-001)
+    (bag.batch_record_id && bag.batch_record_id.startsWith(batchId)) ||
+    // Or match by re_code existing in batch reqs
+    batchReqs.some((r: any) => r.re_code === bag.re_code)
 
   if (belongsToBox) {
     // Correct — this bag belongs to the selected packing box
