@@ -1026,18 +1026,10 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   const alreadyClosed = transferredBoxes.value.some(
     (b: any) => b.batch_id === batchId && (b.wh === wh || b.wh === 'ALL')
   )
-  if (alreadyClosed) {
-    playSound('correct')
-    $q.notify({
-      type: 'info',
-      icon: 'check_circle',
-      message: `📦 ${wh} Box already closed for ${batchId}`,
-      caption: 'No need to re-close and print.',
-      position: 'top',
-      timeout: 3000,
-    })
-    return
-  }
+  // Count how many boxes already exist for this batch+wh
+  const existingBoxCount = transferredBoxes.value.filter(
+    (b: any) => b.batch_id === batchId
+  ).length
 
   // Get all items for this WH: prebatch_recs (per-package) + prebatch_items fallback
   const whMatcher = (r: any) => wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
@@ -1057,12 +1049,14 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   }
 
   const allBoxed = waitReqs.length === 0
+  const nextBoxNum = existingBoxCount + 1
+  const boxLabel = alreadyClosed ? ` Box #${nextBoxNum}` : ''
   const statusMsg = allBoxed
-    ? `All ${boxedReqs.length} items are boxed. Seal this box and print label?`
-    : `${boxedReqs.length}/${whReqs.length} items boxed (${waitReqs.length} still waiting). Seal this box anyway?`
+    ? `All ${boxedReqs.length} items are boxed. Seal${boxLabel} and print label?`
+    : `${boxedReqs.length}/${whReqs.length} items boxed (${waitReqs.length} still waiting). Seal${boxLabel} anyway?`
 
   $q.dialog({
-    title: `Close ${wh} Packing Box`,
+    title: `Close ${wh} Packing${boxLabel}`,
     message: statusMsg,
     cancel: true,
     persistent: true,
@@ -2117,11 +2111,11 @@ onMounted(async () => {
                 </q-btn>
                 <q-btn
                   unelevated size="sm" icon="check_box" label="Close & Print"
-                  :color="filteredBoxScans.length > 0 ? 'green-5' : 'grey-5'"
-                  :disable="filteredBoxScans.length === 0"
+                  :color="boxReqsBoxed > 0 ? 'green-5' : 'grey-5'"
+                  :disable="!selectedBatch"
                   @click="onCloseBox(filterMiddleWh === 'ALL' ? 'FH' : filterMiddleWh)"
                 >
-                  <q-tooltip>{{ filteredBoxScans.length > 0 ? 'Seal Box & Print Label' : 'Scan items first' }}</q-tooltip>
+                  <q-tooltip>{{ boxReqsBoxed > 0 ? 'Seal Box & Print Label' : 'Scan items first' }}</q-tooltip>
                 </q-btn>
               </div>
             </div>
