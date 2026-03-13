@@ -307,10 +307,16 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
             return wh === 'FH' ? isFH(rWh) : isSPP(rWh)
         })
 
-        // Use per-package records for the label
+        // Use per-package records → bagsByWarehouse → prebatch_items (fallback for SPP without recs)
+        const bagsWh = wh === 'FH' ? deps.bagsByWarehouse.value.FH : deps.bagsByWarehouse.value.SPP
+        const whFilter = (r: any) => {
+            const rWh = r.wh || ''
+            return wh === 'FH' ? isFH(rWh) : isSPP(rWh)
+        }
+        const reqsFallback = ((deps.selectedBatch.value.reqs || []) as any[]).filter(whFilter)
         const items = whRecs.length > 0
             ? whRecs
-            : (wh === 'FH' ? deps.bagsByWarehouse.value.FH : deps.bagsByWarehouse.value.SPP)
+            : (bagsWh.length > 0 ? bagsWh : reqsFallback)
 
         // Build rows: each item = one row showing preBatch ID, re_code, volume
         const ROW_H = 14, START_Y = 0, MAX_Y = 118  // relative to the <g transform="translate(0,80)"> in template
