@@ -1509,10 +1509,16 @@ const processBagScan = async (rawScan: string) => {
   let bag = null
   let item = null
 
-  // Primary: Match by re_code (most reliable from scan data)
-  if (scannedReCode) {
-    bag = allBags.find(x => x.re_code === scannedReCode)
-    item = batchReqs.find((r: any) => r.re_code === scannedReCode)
+  // Primary: Match by exact batch_record_id (specific package like FV044A-2)
+  bag = allBags.find(x => x.batch_record_id === barcode)
+  item = batchReqs.find((r: any) => r.batch_record_id === barcode)
+
+  // Then try by re_code — prefer UNPACKED items first (to avoid "Already packed" on wrong package)
+  if (!bag && !item && scannedReCode) {
+    bag = allBags.find(x => x.re_code === scannedReCode && x.packing_status !== 1)
+      || allBags.find(x => x.re_code === scannedReCode)
+    item = batchReqs.find((r: any) => r.re_code === scannedReCode && r.packing_status !== 1)
+      || batchReqs.find((r: any) => r.re_code === scannedReCode)
   }
 
   // Fallback: match by prebatch_id / batch_record_id
