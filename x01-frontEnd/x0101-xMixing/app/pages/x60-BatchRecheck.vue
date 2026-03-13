@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useQuasar } from 'quasar'
 import { appConfig } from '~/appConfig/config'
 import { useLabelPrinter } from '../composables/useLabelPrinter'
@@ -35,6 +35,16 @@ const allRecheckVerified = computed(() => {
     if (!batchRecheck.value) return false
     return batchRecheck.value.summary.all_ok
 })
+
+// ── Awaiting recheck list ──
+const awaitingBatches = ref<any[]>([])
+const fetchAwaitingBatches = async () => {
+    try {
+        awaitingBatches.value = await $fetch<any[]>(`${appConfig.apiBaseUrl}/production-batches/awaiting-recheck`, {
+            headers: getAuthHeader() as Record<string, string>
+        })
+    } catch { /* ignore */ }
+}
 
 // Box scan input (top bar)
 const boxScanInput = ref('')
@@ -285,7 +295,7 @@ const fetchBatchRecheck = async (batchId: string) => {
         const s = data.summary
         showFeedback('success', `Batch loaded: ${s.total} items (${s.checked} checked, ${s.pending} pending)`, 'BATCH LOADED')
         playSound('success')
-        nextTick(() => { bagScanRef.value?.focus() })
+        setTimeout(() => { bagScanRef.value?.focus() }, 200)
     } catch (error: any) {
         console.error('Error fetching batch recheck:', error)
         batchRecheck.value = null
@@ -348,22 +358,25 @@ const parseAndHandleScan = async (barcode: string, context: 'box' | 'bag') => {
     const parts = barcode.split(',')
 
     if (context === 'box') {
-        // Try batch-level recheck first (batch ID format: P260311-xx-xx-xxx)
-        const batchCandidate = parts.length >= 3 && parts[2] === 'BOX' ? parts[1]! : barcode
-        const isBatchId = /^P\d{6}-\d{2}-\d{2}-\d{3}$/i.test(batchCandidate)
-
-        if (isBatchId) {
-            const ok = await fetchBatchRecheck(batchCandidate)
-            if (ok) return
-        }
+        let candidate = barcode
 
         if (parts.length >= 3 && parts[2] === 'BOX') {
             // Box QR: plan_id,batch_id,BOX,bag_count,total_vol
-            fetchBoxDetails(parts[1]!)
-        } else {
-            // Plain text as box ID
-            fetchBoxDetails(barcode)
+            candidate = parts[1]!
+        } else if (parts.length >= 4 && parts[2] !== 'BOX') {
+            // PreBatch bag QR: plan_id,batch_record_id,prebatch_id,re_code,volume
+            // Extract batch_id from batch_record_id (e.g. P260311-02-02-003-FV044A-2 → P260311-02-02-003)
+            const batchRecordId = parts[1]!
+            const dashParts = batchRecordId.split('-')
+            candidate = dashParts.length >= 4 ? dashParts.slice(0, 4).join('-') : batchRecordId
         }
+
+        // Always try batch-level recheck first
+        const ok = await fetchBatchRecheck(candidate)
+        if (ok) return
+
+        // Fallback: box-level
+        fetchBoxDetails(candidate)
     } else {
         // Bag scan
         const bagBarcode = parts.length >= 4 && parts[2] !== 'BOX' ? parts[1]! : barcode
@@ -625,6 +638,22 @@ const onBagScanSubmit = () => {
     }
 }
 
+// Auto-search debounce timers
+let boxDebounce: ReturnType<typeof setTimeout> | null = null
+let bagDebounce: ReturnType<typeof setTimeout> | null = null
+
+watch(boxScanInput, (val) => {
+    if (boxDebounce) clearTimeout(boxDebounce)
+    if (!val?.trim()) return
+    boxDebounce = setTimeout(() => { onBoxScanSubmit() }, 500)
+})
+
+watch(bagScanInput, (val) => {
+    if (bagDebounce) clearTimeout(bagDebounce)
+    if (!val?.trim()) return
+    bagDebounce = setTimeout(() => { onBagScanSubmit() }, 500)
+})
+
 // --- Helpers ---
 
 const showFeedback = (type: 'success' | 'error' | 'warning', message: string, title: string) => {
@@ -765,6 +794,7 @@ const printQCReport = async () => {
 
 onMounted(() => {
     fetchPlansAndBatches()
+    fetchAwaitingBatches()
 })
 </script>
 
@@ -800,15 +830,7 @@ onMounted(() => {
             <div class="col">
               <q-input v-model="boxScanInput" outlined dense :placeholder="t('recheck.scanBoxPlaceholder')" @keyup.enter="onBoxScanSubmit" autofocus bg-color="white" style="font-size: 12px;">
                 <template v-slot:prepend><q-icon name="inbox" color="blue-9" size="xs" /></template>
-                <template v-slot:append>
-                  <q-btn flat round dense icon="document_scanner" color="blue-9" @click="openScannerSimulator('box')">
-                    <q-tooltip>{{ t('recheck.openSimulator') }}</q-tooltip>
-                  </q-btn>
-                </template>
               </q-input>
-            </div>
-            <div>
-              <q-btn unelevated color="blue-9" icon="search" dense @click="onBoxScanSubmit" :loading="loading" />
             </div>
           </div>
         </q-card-section>
@@ -824,6 +846,9 @@ onMounted(() => {
         </q-badge>
         <q-badge color="indigo-7" class="q-pa-xs q-px-sm" style="font-size: 12px;">
           <q-icon name="science" size="14px" class="q-mr-xs" />Batch: {{ recheckBatchId }}
+        </q-badge>
+        <q-badge v-if="batchRecheck.box_ids?.length" color="deep-purple-6" class="q-pa-xs q-px-sm" style="font-size: 12px;">
+          <q-icon name="inbox" size="14px" class="q-mr-xs" />📦 {{ batchRecheck.box_ids.join(', ') }}
         </q-badge>
         <q-badge :color="batchRecheck.fh_boxed_at ? 'green' : 'grey'" class="q-pa-xs q-px-sm" style="font-size: 12px;">
           <q-icon name="check_box" size="14px" class="q-mr-xs" />FH {{ batchRecheck.fh_boxed_at ? '✅' : '⏳' }}
@@ -848,12 +873,6 @@ onMounted(() => {
               <q-input v-model="bagScanInput" ref="bagScanRef" outlined dense placeholder="Scan preBatch bag to verify..." @keyup.enter="onBagScanSubmit" bg-color="white" style="font-size: 12px;">
                 <template v-slot:prepend><q-icon name="qr_code_scanner" color="amber-9" size="xs" /></template>
               </q-input>
-            </div>
-            <div>
-              <q-btn unelevated color="amber-9" icon="search" dense @click="onBagScanSubmit" :loading="loading" />
-              <q-btn flat dense round icon="document_scanner" color="amber-9" @click="openScannerSimulator('bag')" class="q-ml-xs">
-                <q-tooltip>Open Scanner Simulator</q-tooltip>
-              </q-btn>
             </div>
           </div>
         </q-card-section>
@@ -1097,13 +1116,46 @@ onMounted(() => {
           </div>
         </div>
 
-        <!-- Empty state inside card -->
-        <div v-else style="flex: 1; display: flex; align-items: center; justify-content: center;">
-          <div class="text-center q-pa-lg">
-            <q-icon name="outbox" size="60px" color="blue-grey-3" />
-            <div class="text-body1 text-grey-5 q-mt-sm">{{ t('recheck.scanToBegin') }}</div>
-            <div class="text-caption text-grey-4">{{ t('recheck.loadBoxToVerify') }}</div>
-            <q-btn class="q-mt-sm" icon="document_scanner" :label="t('recheck.openSimulator')" unelevated color="blue-9" size="sm" @click="openScannerSimulator('box')" />
+        <!-- Awaiting recheck table (empty state — shown when no batch loaded) -->
+        <div v-else style="flex: 1; overflow: auto;">
+          <div class="q-pa-xs bg-amber-1 text-amber-9 text-weight-bold row items-center q-gutter-xs" style="font-size: 11px; position: sticky; top: 0; z-index: 1;">
+            <q-icon name="pending_actions" size="xs" />
+            <span>📋 Batches Awaiting Re-Check ({{ awaitingBatches.length }})</span>
+            <q-space />
+            <q-btn flat round dense icon="refresh" size="xs" color="amber-9" @click="fetchAwaitingBatches" />
+          </div>
+          <q-markup-table v-if="awaitingBatches.length > 0" flat dense separator="cell" style="font-size: 11px;">
+            <thead class="bg-amber-1">
+              <tr>
+                <th class="text-left">Plant</th>
+                <th class="text-left">SKU</th>
+                <th class="text-left">Plan</th>
+                <th class="text-left">Batch</th>
+                <th class="text-right">Volume</th>
+                <th class="text-center">FH</th>
+                <th class="text-center">SPP</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="b in awaitingBatches" :key="b.batch_id"
+                class="cursor-pointer"
+                style="transition: background .15s;"
+                @mouseover="($event.currentTarget as HTMLElement).style.background='#fff3e0'"
+                @mouseout="($event.currentTarget as HTMLElement).style.background=''"
+                @click="boxScanInput = b.batch_id; onBoxScanSubmit()">
+                <td>{{ b.plant }}</td>
+                <td class="text-weight-medium" style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">{{ b.sku_id }}</td>
+                <td>{{ b.plan_id }}</td>
+                <td class="text-weight-bold text-blue-9">{{ b.batch_id }}</td>
+                <td class="text-right">{{ (b.batch_size || 0).toFixed(1) }} kg</td>
+                <td class="text-center"><q-icon :name="b.fh_boxed ? 'check_circle' : 'cancel'" :color="b.fh_boxed ? 'green' : 'grey-4'" size="16px" /></td>
+                <td class="text-center"><q-icon :name="b.spp_boxed ? 'check_circle' : 'cancel'" :color="b.spp_boxed ? 'green' : 'grey-4'" size="16px" /></td>
+              </tr>
+            </tbody>
+          </q-markup-table>
+          <div v-else class="text-center q-pa-lg text-grey-5">
+            <q-icon name="check_circle" size="40px" color="green-3" /><br>
+            <span class="text-caption">No batches awaiting re-check</span>
           </div>
         </div>
 
@@ -1118,123 +1170,7 @@ onMounted(() => {
       </q-card>
     </div>
 
-    <!-- ===== SCANNER SIMULATOR DIALOG ===== -->
-    <q-dialog v-model="showScannerDialog" maximized transition-show="slide-up" transition-hide="slide-down">
-      <q-card class="bg-grey-10 text-white">
-        <q-bar class="bg-blue-9 text-white">
-          <q-icon name="document_scanner" />
-          <div class="text-weight-bold q-ml-sm">
-            {{ t('recheck.simulatorTitle') }} —
-            {{ scannerMode === 'box' ? t('recheck.clickBoxToLoad') : t('recheck.clickBagToVerify') }}
-          </div>
-          <q-space />
-          <q-btn dense flat icon="close" v-close-popup />
-        </q-bar>
 
-        <q-card-section class="row q-col-gutter-md" style="height: calc(100vh - 50px); overflow: auto;">
-          <!-- Left: Packing Box Labels -->
-          <div class="col-12 col-md-3">
-            <div class="text-overline text-blue-3 q-mb-sm">📦 PACKING BOX LABELS</div>
-            <q-list dark separator dense class="rounded-borders" style="background: rgba(255,255,255,0.05)">
-              <q-item
-                v-for="batch in allBatches"
-                :key="batch.batch_id"
-                clickable
-                @click="onSimSelectBatch(batch)"
-                :active="selectedSimBatch?.batch_id === batch.batch_id"
-                active-class="bg-blue-9 text-white"
-                class="q-py-sm"
-              >
-                <q-item-section>
-                  <q-item-label class="text-weight-bold text-white">{{ batch.batch_id }}</q-item-label>
-                  <q-item-label caption class="text-grey-4">{{ batch.sku_name }}</q-item-label>
-                </q-item-section>
-              </q-item>
-            </q-list>
-          </div>
-
-          <!-- Right: Labels Preview -->
-          <div class="col-12 col-md-9">
-            <q-inner-loading :showing="scannerLoading" dark />
-
-            <div v-if="selectedSimBatch && !scannerLoading">
-              <!-- Box Label -->
-              <div class="row items-center q-mb-sm q-gutter-md">
-                <div class="text-overline text-blue-3">
-                  📦 {{ t('recheck.boxLabel') }} {{ scannerMode === 'box' ? '— ' + t('recheck.clickBoxToLoad') : '' }}
-                </div>
-                <q-btn v-if="previewLabelSvg" size="sm" color="blue-9" icon="print" label="Print Box" @click="printLabel(previewLabelSvg)" />
-              </div>
-              <div
-                class="label-preview box-label-preview q-mb-lg"
-                :class="{ 'cursor-pointer hover-highlight': scannerMode === 'box' }"
-                @click="scannerMode === 'box' && onClickBoxLabel()"
-                v-html="previewLabelSvg"
-              />
-
-              <!-- Bags inside box (correct + wrong mixed together) -->
-              <div class="text-overline text-blue-3 q-mb-sm">
-                🏷️ {{ t('recheck.bagsInBoxLabel') }} {{ scannerMode === 'bag' ? '— ' + t('recheck.clickToScan') : '' }}
-              </div>
-              <div class="row q-col-gutter-sm">
-                <!-- Correct bags from this batch -->
-                <div
-                  v-for="bag in previewBagLabels"
-                  :key="bag.batch_record_id"
-                  class="col-6 col-md-4 col-lg-3"
-                >
-                  <div
-                    class="label-preview bag-label-preview"
-                    :class="{
-                      'cursor-pointer hover-highlight': scannerMode === 'bag',
-                      'bag-label-scanned': isBagScannedInBox(bag.batch_record_id)
-                    }"
-                    @click="scannerMode === 'bag' && onClickBagLabel(bag)"
-                  >
-                    <div v-html="bag.svg" />
-                    <div v-if="isBagScannedInBox(bag.batch_record_id)" class="scanned-overlay">
-                      <q-icon name="check_circle" color="positive" size="42px" />
-                      <div class="text-positive text-weight-bold text-caption">VERIFIED</div>
-                    </div>
-                  </div>
-                  <div class="row items-center justify-between q-mt-xs">
-                    <div class="text-caption text-grey-4">{{ bag.re_code }}</div>
-                    <q-btn size="xs" color="blue-9" icon="print" label="Print" @click.stop="printLabel(bag.svg)" />
-                  </div>
-                </div>
-
-                <!-- WRONG bags mixed in (from other batches — simulating wrong placement) -->
-                <div
-                  v-for="bag in (scannerMode === 'bag' ? otherBatchBagLabels : [])"
-                  :key="'wrong-' + bag.batch_record_id"
-                  class="col-6 col-md-4 col-lg-3"
-                >
-                  <div
-                    class="label-preview bag-label-preview wrong-bag-preview cursor-pointer"
-                    @click="onClickWrongBagLabel(bag)"
-                  >
-                    <div v-html="bag.svg" />
-                    <div class="wrong-bag-badge">
-                      <q-icon name="warning" size="16px" />
-                      {{ t('recheck.wrongBatch') }}
-                    </div>
-                  </div>
-                  <div class="row items-center justify-between q-mt-xs">
-                    <div class="text-caption text-red-4">{{ bag.re_code }}</div>
-                    <q-btn size="xs" color="blue-9" icon="print" label="Print" @click.stop="printLabel(bag.svg)" />
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-else-if="!scannerLoading" class="text-center q-pa-xl text-grey-5">
-              <q-icon name="touch_app" size="80px" />
-              <div class="text-h6 q-mt-md">{{ t('recheck.selectBatchPrompt') }}</div>
-            </div>
-          </div>
-        </q-card-section>
-      </q-card>
-    </q-dialog>
 
     <!-- ===== SOUND SETTINGS DIALOG ===== -->
     <q-dialog v-model="showSoundSettings">

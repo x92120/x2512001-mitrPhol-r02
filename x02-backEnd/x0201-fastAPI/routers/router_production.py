@@ -1113,6 +1113,29 @@ def get_production_summary_stats(db: Session = Depends(get_db)):
 # RE-CHECK / VERIFICATION LOGIC
 # =============================================================================
 
+@router.get("/production-batches/awaiting-recheck")
+def get_batches_awaiting_recheck(db: Session = Depends(get_db)):
+    """Return batches that are boxed but not yet released to production."""
+    batches = db.query(models.ProductionBatch).filter(
+        (models.ProductionBatch.fh_boxed_at.isnot(None)) | (models.ProductionBatch.spp_boxed_at.isnot(None)),
+        models.ProductionBatch.ready_to_product == False
+    ).all()
+
+    result = []
+    for b in batches:
+        plan = db.query(models.ProductionPlan).filter(models.ProductionPlan.id == b.plan_id).first()
+        result.append({
+            "batch_id": b.batch_id,
+            "plan_id": plan.plan_id if plan else "-",
+            "sku_id": b.sku_id,
+            "sku_name": plan.sku_name if plan else "-",
+            "plant": b.plant or "-",
+            "batch_size": b.batch_size or 0,
+            "fh_boxed": b.fh_boxed_at is not None,
+            "spp_boxed": b.spp_boxed_at is not None,
+        })
+    return result
+
 @router.get("/prebatch-recs/recheck-batch/{batch_id}")
 def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     """
@@ -1146,13 +1169,16 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     checklist = []
 
     for r in recs:
+        # Get WH from the requirement record
+        req = db.query(models.PreBatchReq).filter(models.PreBatchReq.id == r.req_id).first()
+        wh = req.wh if req and req.wh else "FH"
         checklist.append({
             "id": r.id,
             "source": "rec",
             "batch_record_id": r.batch_record_id,
             "re_code": r.re_code,
             "mat_sap_code": r.mat_sap_code,
-            "wh": "FH" if r.re_code and any(r.batch_record_id.startswith(batch_id) for _ in [1]) else "SPP",
+            "wh": wh,
             "package_no": r.package_no,
             "total_packages": r.total_packages,
             "net_volume": r.net_volume,
@@ -1164,8 +1190,11 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
         })
 
     for item in items:
-        # Determine WH from item
         wh = item.wh or "Mix"
+        if wh.upper() in ("MIX",):  # Skip non-packing items
+            continue
+        if item.re_code in rec_codes:  # Skip items that already have per-package recs
+            continue
         checklist.append({
             "id": item.id,
             "source": "item",
@@ -1189,12 +1218,16 @@ def get_recheck_batch_details(batch_id: str, db: Session = Depends(get_db)):
     errors = sum(1 for c in checklist if c["recheck_status"] == 2)
     pending = total - checked - errors
 
+    # Collect distinct packing box IDs from recs
+    box_ids = sorted(set(r.box_id for r in recs if r.box_id))
+
     return {
         "batch_id": batch_id,
         "plan_id": plan.plan_id if plan else None,
         "sku_id": sku_id,
         "sku_name": plan.sku_name if plan else "Unknown",
         "plant": batch.plant,
+        "box_ids": box_ids,
         "fh_boxed_at": batch.fh_boxed_at.isoformat() if batch.fh_boxed_at else None,
         "spp_boxed_at": batch.spp_boxed_at.isoformat() if batch.spp_boxed_at else None,
         "checklist": checklist,
