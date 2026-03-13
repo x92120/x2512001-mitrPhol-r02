@@ -1026,9 +1026,9 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   const alreadyClosed = transferredBoxes.value.some(
     (b: any) => b.batch_id === batchId && (b.wh === wh || b.wh === 'ALL')
   )
-  // Count how many boxes already exist for this batch+wh
+  // Count how many boxes already exist for this batch+wh (not other WH)
   const existingBoxCount = transferredBoxes.value.filter(
-    (b: any) => b.batch_id === batchId
+    (b: any) => b.batch_id === batchId && (wh === 'FH' ? isFH(b.wh || '') : isSPP(b.wh || ''))
   ).length
 
   // Get all items for this WH: prebatch_recs (per-package) + prebatch_items fallback

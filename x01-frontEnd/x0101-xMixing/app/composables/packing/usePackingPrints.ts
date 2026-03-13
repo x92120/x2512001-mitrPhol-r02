@@ -314,9 +314,11 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
             return wh === 'FH' ? isFH(rWh) : isSPP(rWh)
         }
         const reqsFallback = ((deps.selectedBatch.value.reqs || []) as any[]).filter(whFilter)
-        const items = whRecs.length > 0
+        const allItems = whRecs.length > 0
             ? whRecs
             : (bagsWh.length > 0 ? bagsWh : reqsFallback)
+        // Only show items that are BOXED (packing_status === 1) on the label
+        const items = allItems.filter((r: any) => r.packing_status === 1)
 
         // Build rows: each item = one row showing preBatch ID, re_code, volume
         const ROW_H = 14, START_Y = 0, MAX_Y = 118  // relative to the <g transform="translate(0,80)"> in template
@@ -337,7 +339,8 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
                 pushPageAndReset()
             }
 
-            const preBatchId = item.batch_record_id || item.prebatch_id || '-'
+            const batchId = deps.selectedBatch.value.batch_id
+            const preBatchId = item.batch_record_id || item.prebatch_id || (batchId ? `${batchId}-${item.re_code}` : item.re_code || '-')
             const reCode = item.re_code || '-'
             const volume = (item.net_volume ?? item.required_volume ?? item.total_packaged ?? 0).toFixed(4)
             const bg = idx % 2 === 0 ? '#f8f8f8' : '#ffffff'
