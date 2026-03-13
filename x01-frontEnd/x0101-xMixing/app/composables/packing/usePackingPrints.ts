@@ -17,6 +17,7 @@ export interface PackingPrintDeps {
     showTransferDialog: any // ref<boolean>
     currentBoxScans: any    // ref<any[]>
     filteredBoxScans: any   // computed<any[]>
+    batchRecords: any       // ref<any[]> — prebatch_recs (per-package)
 }
 
 export const usePackingPrints = (deps: PackingPrintDeps) => {
@@ -290,17 +291,17 @@ export const usePackingPrints = (deps: PackingPrintDeps) => {
 
         const plan = deps.plans.value.find((p: any) => p.batches?.some((b: any) => b.batch_id === deps.selectedBatch.value.batch_id))
 
-        // Use selectedBatch.reqs (prebatch items with packing status) as primary data source
+        // Use batchRecords (prebatch_recs — per-package) as primary data source
         const isFH = (w: string) => w?.toUpperCase().includes('FH') || w?.toUpperCase().includes('FLAVOUR')
         const isSPP = (w: string) => w?.toUpperCase().includes('SPP')
-        const whReqs = ((deps.selectedBatch.value.reqs || []) as any[]).filter((r: any) => {
+        const whRecs = (deps.batchRecords?.value || []).filter((r: any) => {
             const rWh = r.wh || ''
             return wh === 'FH' ? isFH(rWh) : isSPP(rWh)
         })
 
-        // Use all reqs for this WH (both boxed and waiting) — the label shows the full packing list
-        const items = whReqs.length > 0
-            ? whReqs
+        // Use per-package records for the label
+        const items = whRecs.length > 0
+            ? whRecs
             : (wh === 'FH' ? deps.bagsByWarehouse.value.FH : deps.bagsByWarehouse.value.SPP)
 
         // Build rows: each item = one row showing preBatch ID, re_code, volume

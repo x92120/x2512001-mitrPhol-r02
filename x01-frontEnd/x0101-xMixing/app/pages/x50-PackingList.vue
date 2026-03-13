@@ -857,19 +857,19 @@ const filteredBoxScans = computed(() => {
   return currentBoxScans.value.filter(bag => bag.wh === filterMiddleWh.value)
 })
 
-/** Group selectedBatch.reqs by re_code for the current WH, showing all prebatch items with Wait/Boxed status */
+/** Group batchRecords (prebatch_recs) by re_code for current WH — shows each PACKAGE with Wait/Boxed status */
 interface BoxReqGroup { re_code: string; items: any[] }
 const boxReqsGrouped = computed((): BoxReqGroup[] => {
-  if (!selectedBatch.value?.reqs) return []
+  if (batchRecords.value.length === 0) return []
   const wh = filterMiddleWh.value
-  const reqs = (selectedBatch.value.reqs as any[]).filter((r: any) => {
+  const recs = batchRecords.value.filter((r: any) => {
     if (wh === 'ALL') return true
     if (wh === 'FH') return isFH(r.wh || '')
     if (wh === 'SPP') return isSPP(r.wh || '')
     return r.wh === wh
   })
   const map = new Map<string, BoxReqGroup>()
-  for (const r of reqs) {
+  for (const r of recs) {
     const code = r.re_code || '?'
     if (!map.has(code)) map.set(code, { re_code: code, items: [] })
     map.get(code)!.items.push(r)
@@ -1006,8 +1006,8 @@ const onCloseBox = (wh: 'FH' | 'SPP') => {
   if (!selectedBatch.value) return
   const batchId = selectedBatch.value.batch_id
 
-  // Get all reqs for this WH from selectedBatch.reqs
-  const whReqs = ((selectedBatch.value.reqs || []) as any[]).filter((r: any) =>
+  // Get all packages for this WH from batchRecords (prebatch_recs — per-package)
+  const whReqs = batchRecords.value.filter((r: any) =>
     wh === 'FH' ? isFH(r.wh || '') : isSPP(r.wh || '')
   )
   const boxedReqs = whReqs.filter((r: any) => r.packing_status === 1)
@@ -1084,6 +1084,7 @@ const { printPackingBoxReport, printTransferReport, printBoxLabel, printBagLabel
   showTransferDialog,
   currentBoxScans,
   filteredBoxScans,
+  batchRecords,
 })
 
 // ── Inline Print: Packing Box Label (no new tab) ──────────────────
@@ -1323,17 +1324,18 @@ const onSimScanClick = async (bag: any) => {
     // Correct — this bag belongs to the selected packing box
     playSound('correct')
 
-    // Find matching req item and update packing_status to 1 (Boxed)
-    const matchingReq = batchReqs.find((r: any) => r.re_code === bag.re_code && r.packing_status !== 1)
-      || batchReqs.find((r: any) => r.re_code === bag.re_code)
-    if (matchingReq && matchingReq.packing_status !== 1) {
+    // Find the specific PACKAGE in batchRecords to update packing_status
+    // Match by batch_record_id first (exact package), then by re_code (first unpacked)
+    const matchingRec = batchRecords.value.find((r: any) => r.batch_record_id === bag.batch_record_id && r.packing_status !== 1)
+      || batchRecords.value.find((r: any) => r.re_code === bag.re_code && r.packing_status !== 1)
+    if (matchingRec && matchingRec.packing_status !== 1) {
       try {
-        await $fetch(`${appConfig.apiBaseUrl}/prebatch-items/${matchingReq.id}/packing-status`, {
+        await $fetch(`${appConfig.apiBaseUrl}/prebatch-recs/${matchingRec.id}/packing-status`, {
           method: 'PATCH',
           headers: getAuthHeader() as Record<string, string>,
           body: { packing_status: 1, packed_by: 'operator' },
         })
-        matchingReq.packing_status = 1  // Update locally for immediate UI refresh
+        matchingRec.packing_status = 1  // Update locally for immediate UI refresh
       } catch (e) {
         console.error('Failed to update packing status:', e)
       }
